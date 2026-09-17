@@ -1,7 +1,7 @@
 Package: ADEPT
 Type: Package
 Title: Automated Depth Profiling Technique for U-Pb Geochronology
-Version: 1.1.0
+Version: 1.2.0
 Date: 2026-09-17
 Authors@R: c(
     person("Yao", "Wang", role = c("aut", "cre"), email = "yaowang_cugb@163.com"),
@@ -25,6 +25,11 @@ Description: An automated method to quantitatively identify and extract age plat
     conversion, PELT segmentation, ARIMA order selection and plotting are
     implemented inside the package, so results do not depend on the changing
     behaviour of third-party packages.
+    v1.2.0 adds a full uncertainty budget (random vs systematic, including the
+    decay-constant contribution), a parameter-sensitivity sweep, a monotonic-
+    subsequence plateau selector that no longer collapses to two plateaus on
+    noisy data, input validation, and an optional robust-LOESS pre-processing
+    path that removes the need for ARIMA outlier screening.
     Method described in Wang et al. (2026), JGR: Solid Earth, 131, e2025JB033324.
 License: MIT + file LICENSE
 Encoding: UTF-8
@@ -40,6 +45,7 @@ Suggests:
     writexl,
     mcp,
     shiny,
-    DT
+    DT,
+    parallel
 URL: https://github.com/yaowang-space/ADEPT
 BugReports: https://github.com/yaowang-space/ADEPT/issues

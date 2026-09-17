@@ -52,20 +52,30 @@ pelt_mean <- function(x, pen, minseglen = 1L) {
   R    <- 0L                       # candidate previous changepoint
 
   for (t in seq_len(n)) {
+    # Only tau <= t - minseglen keeps *every* segment at least minseglen long,
+    # including the first one (tau = 0 requires t >= minseglen). When no such
+    # candidate exists, t cannot end a segment and F(t) stays Inf.
     cand <- R[R <= t - minseglen]
-    if (length(cand) == 0L) cand <- max(0L, t - minseglen)
-    vals <- Fv[cand + 1L] + pelt_seg_cost(cs1, cs2, cand + 1L, t) + pen
-    k    <- which.min(vals)
-    Fv[t + 1L] <- vals[k]
-    last[t]    <- cand[k]
-
-    # pruning
-    keep <- R[R <= t - minseglen]
-    if (length(keep)) {
-      keep <- keep[Fv[keep + 1L] + pelt_seg_cost(cs1, cs2, keep + 1L, t) <
-                     Fv[t + 1L]]
+    if (length(cand) == 0L) {
+      last[t] <- 0L
+    } else {
+      vals <- Fv[cand + 1L] + pelt_seg_cost(cs1, cs2, cand + 1L, t) + pen
+      k    <- which.min(vals)
+      Fv[t + 1L] <- vals[k]
+      last[t]    <- cand[k]
     }
-    R <- c(keep, t)
+
+    # Pruning. Only candidates that were actually *evaluated* at time t may be
+    # discarded; anything still inside the minimum-segment lookback has not
+    # been costed yet and must survive to be considered at a later t.
+    evaluable <- R[R <= t - minseglen]
+    if (length(evaluable)) {
+      keep <- Fv[evaluable + 1L] +
+              pelt_seg_cost(cs1, cs2, evaluable + 1L, t) < Fv[t + 1L]
+      evaluable <- evaluable[keep]
+    }
+    pending <- R[R > t - minseglen]
+    R <- c(evaluable, pending, t)
   }
 
   cpts <- integer(0)

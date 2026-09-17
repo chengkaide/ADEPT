@@ -279,6 +279,92 @@ arima_outlier <- function(series, method = c("arima", "mad", "none"),
 #  Preprocessing
 # ---------------------------------------------------------------------------
 
+#' Sanity-check a parsed segment table before it enters the pipeline
+#'
+#' Column-name typos, wrong time units and empty segments used to fail deep
+#' inside the model fitting with unhelpful messages. This reports them up front
+#' with something actionable.
+#'
+#' @param d Parsed data.frame with Time plus at least one age column.
+#' @param label Sheet / chunk label used in the message.
+#' @param strict If TRUE, stop on a hard error; if FALSE, return the problems
+#'   as a character vector and let the caller warn and skip.
+#' @param check_values Also test the age values themselves. Only meaningful
+#'   once the ablation window has been applied - deep-profile files routinely
+#'   contain nonsense ages in the gas-blank and wash-out portions.
+#' @return Character vector of problems (empty when the data look sane).
+#' @keywords internal
+validate_segment_data <- function(d, label = "", strict = FALSE,
+                                  check_values = FALSE) {
+  p <- character(0)
+  add <- function(...) p <<- c(p, paste0(...))
+
+  n <- nrow(d)
+  if (n < 10L) add("only ", n, " rows after parsing (need >= 10)")
+
+  if (!"Time" %in% names(d)) {
+    add("no Time column")
+  } else {
+    tt <- suppressWarnings(as.numeric(d$Time))
+    if (all(is.na(tt))) {
+      add("Time column is not numeric")
+    } else {
+      fin <- tt[is.finite(tt)]
+      if (length(fin) >= 2L) {
+        if (any(diff(fin) < 0)) {
+          add("Time is not monotonically increasing - it may be in ",
+              "milliseconds rather than seconds, or the rows are out of order")
+        }
+        rng <- range(fin)
+        if (rng[2] > 1000) {
+          add("Time spans ", signif(rng[2], 4),
+              " - if that is milliseconds, divide by 1000 first")
+        }
+      }
+    }
+  }
+
+  age_cols <- intersect(c("Age68", "Age75", "Age76", "Pb206", "Pb207",
+                          "U238", "Pb206U238", "Pb207U235", "Pb207Pb206"),
+                        names(d))
+  if (length(age_cols) == 0L) {
+    add("no recognisable age or isotope column")
+  } else {
+    for (cl in age_cols) {
+      v <- suppressWarnings(as.numeric(d[[cl]]))
+      if (all(is.na(v))) add(cl, " is entirely non-numeric")
+    }
+    ok <- rep(TRUE, n)
+    for (cl in age_cols) ok <- ok & !is.na(suppressWarnings(as.numeric(d[[cl]])))
+    if (sum(ok) < 10L) add("only ", sum(ok), " rows with a usable age value")
+
+    if (isTRUE(check_values)) {
+      for (cl in intersect(age_cols, c("Age68", "Age75", "Age76"))) {
+        fin <- suppressWarnings(as.numeric(d[[cl]]))
+        fin <- fin[is.finite(fin)]
+        if (length(fin) == 0L) next
+        neg <- sum(fin < 0)
+        old <- sum(fin > 4568)
+        if (neg > 0L) {
+          add(neg, " negative ", cl,
+              " value(s) inside the ablation window - check the common-Pb ",
+              "correction")
+        }
+        if (old > 0L) {
+          add(old, " ", cl, " value(s) above the age of the Earth inside the ",
+              "ablation window - check the ratio columns")
+        }
+      }
+    }
+  }
+
+  if (length(p) > 0L && isTRUE(strict)) {
+    stop("Input problem in ", label, ": ", paste(p, collapse = "; "),
+         call. = FALSE)
+  }
+  p
+}
+
 #' Discordance filter for U-Pb ages
 #'
 #' For ages < 1000 Ma: marks Age68 as NA if |Age68 - Age75| / Age75 > 0.1
@@ -312,11 +398,16 @@ mean_fill <- function(na_series, original_series, window_size = 5) {
 #'
 #' @param df data.frame with subset_Age and Time columns
 #' @param span LOESS span parameter (default 0.15)
+#' @param family "gaussian" (ordinary least squares, the published pipeline) or
+#'   "symmetric" (robust M-estimation, which downweights outliers). Using
+#'   "symmetric" lets the ARIMA outlier screen be skipped entirely.
 #' @return data.frame with loess_Age, standardized_loess, standardized_Age
 #' @keywords internal
-loess_segment <- function(df, span = 0.15) {
-  loess_model <- try(stats::loess(subset_Age ~ Time, data = df, span = span),
-                     silent = TRUE)
+loess_segment <- function(df, span = 0.15, family = c("gaussian", "symmetric")) {
+  family <- match.arg(family)
+  loess_model <- try(
+    stats::loess(subset_Age ~ Time, data = df, span = span, family = family),
+    silent = TRUE)
   if (inherits(loess_model, "try-error")) {
     warning("LOESS smoothing failed; falling back to raw ages.", call. = FALSE)
     df$loess_Age <- df$subset_Age
@@ -418,18 +509,74 @@ calc_variance <- function(df, seg_starts, seg_ends) {
 
 #' Plateau uncertainties
 #'
-#' Calibration uncertainty = Segment_Mean * 0.03
-#' Plateau uncertainty = sd(Raw_Age) / sqrt(n) within the segment
-#' Total = sqrt(cal^2 + plateau^2)
+#' The three columns that existed before are kept with exactly the same
+#' meaning and values:
+#'   Calibration uncertainty = Segment_Mean * calibration_uncertainty
+#'   Plateau uncertainty     = sd(Raw_Age) / sqrt(n) inside the plateau
+#'   Total uncertainty       = sqrt(cal^2 + plateau^2)
+#'
+#' v1.2.0 adds a decomposition separating what was *measured* from what was
+#' *assumed*, plus the systematic contribution of the decay constants:
+#'
+#'   Random uncertainty      = sqrt(plateau^2 + cal^2)
+#'                             (use this to compare ages within a session)
+#'   Systematic uncertainty  = age * relative 1-sigma of the decay constants
+#'                             (fully correlated between samples)
+#'   Total incl. decay       = sqrt(random^2 + systematic^2)
+#'
+#' The legacy `Total_uncertainty` deliberately excludes the decay constants so
+#' that previously published numbers do not move. Quote the new column
+#' (`Total_uncertainty_full`) in a paper.
+#'
+#' @param segments Segment data.frame.
+#' @param df Point-level data.frame (needs Raw_Age, Age68, Age76).
+#' @param seg_starts,seg_ends Integer segment boundaries.
+#' @param calibration_uncertainty Relative 1-sigma reproducibility of the
+#'   primary reference material (default 0.03, i.e. 3 \%).
+#' @param decay_system Age system behind the plateau age: "auto", "Age68",
+#'   "Age75" or "Age76". "auto" picks Age68 below 1 Ga and Age76 above it,
+#'   matching how Raw_Age is built.
 #' @keywords internal
-calc_uncertainty <- function(segments, df, seg_starts, seg_ends) {
-  segments$Calibration_uncertainty <- segments$Segment_Mean * 0.03
+calc_uncertainty <- function(segments, df, seg_starts, seg_ends,
+                             calibration_uncertainty = 0.03,
+                             decay_system = c("auto", "Age68", "Age75",
+                                              "Age76")) {
+  decay_system <- match.arg(decay_system)
+
+  segments$Calibration_uncertainty <-
+    segments$Segment_Mean * calibration_uncertainty
   n  <- seg_count(df$Raw_Age, seg_starts, seg_ends)
   sd <- seg_sd_na(df$Raw_Age, seg_starts, seg_ends)
   pu <- sd / sqrt(n)
   pu[n < 2L] <- NA_real_
   segments$Plateau_uncertainty <- pu
-  segments$Total_uncertainty <- sqrt(segments$Calibration_uncertainty^2 + pu^2)
+  segments$Total_uncertainty <-
+    sqrt(segments$Calibration_uncertainty^2 + pu^2)
+
+  # ---- v1.2.0 decomposition ------------------------------------------------
+  m <- nrow(segments)
+  if (identical(decay_system, "auto")) {
+    seg_id_vec <- rep(NA_integer_, nrow(df))
+    for (i in seq_along(seg_starts)) {
+      seg_id_vec[seg_starts[i]:seg_ends[i]] <- i
+    }
+    is68 <- !is.na(df$Age68) & df$Age68 < 1000
+    frac68 <- tapply(is68, seg_id_vec, mean, na.rm = TRUE)
+    frac68 <- as.numeric(frac68[as.character(seq_len(m))])
+    system <- ifelse(is.na(frac68) | frac68 >= 0.5, "Age68", "Age76")
+  } else {
+    system <- rep(decay_system, m)
+  }
+
+  rel <- adept_decay_rel_1s(system, segments$Segment_Mean)
+  segments$Decay_system <- as.character(system)
+  segments$Decay_constant_uncertainty <- segments$Segment_Mean * rel
+  segments$Random_uncertainty <- segments$Total_uncertainty
+  segments$Systematic_uncertainty <- segments$Decay_constant_uncertainty
+  segments$Total_uncertainty_full <-
+    sqrt(segments$Random_uncertainty^2 + segments$Systematic_uncertainty^2)
+  segments$Relative_uncertainty_pct <-
+    100 * segments$Total_uncertainty_full / segments$Segment_Mean
   segments
 }
 

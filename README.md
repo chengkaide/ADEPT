@@ -217,6 +217,64 @@ Input Excel → Format Detection → ARIMA Outliers → Discordance Filter
 
 ## Changelog
 
+### 1.2.0
+
+Focused on the two things a reviewer is most likely to challenge: where the
+reported uncertainty comes from, and how much of the result rests on the
+parameter choices. Existing numbers do not move - every change is either
+additive or opt-in.
+
+**Uncertainty budget.** The reference-material reproducibility was a literal
+`0.03` buried in `calc_uncertainty()`, and on the bundled example it accounted
+for **93-95 % of the reported total uncertainty** (the measured within-plateau
+scatter contributed only 5-7 %). It is now the parameter
+`calibration_uncertainty`, and the budget is decomposed:
+
+| column | meaning |
+|---|---|
+| `Random uncertainty (Ma)` | within-plateau scatter + reference-material reproducibility |
+| `Systematic uncertainty (Ma)` | decay constants (fully correlated between samples) |
+| `Decay constant uncertainty (Ma)` | the decay-constant term on its own |
+| `Total uncertainty incl. decay (Ma)` | quadrature sum of the two |
+| `Decay system` | which system the plateau age came from |
+
+The legacy `Total uncertainty` deliberately keeps excluding the decay
+constants, so previously published numbers are unchanged. Decay-constant
+relative 1-sigma values follow IsoplotR (Jaffey et al. 1971; Hiess et al.
+2012): 0.0535 % for 206Pb/238U, 0.0680 % for 207Pb/235U, and ~0.15 % at 2 Ga
+for 207Pb/206Pb (age-dependent, evaluated per plateau - the two decay constants
+partly cancel, which is why 207Pb/206Pb ages are less sensitive).
+
+**Parameter sensitivity.** New `adept_sensitivity()` sweeps
+`variance_threshold`, `min_plateau_resolution` and `filter_direction`, and
+returns a tidy table of plateau counts and ages. On the bundled example the
+plateau count runs 0 / 1 / 3 for thresholds 0.05 / 0.08 / 0.1192 and 3 / 1 / 0
+for minimum durations of 5 / 8 / 15 s - i.e. the defaults sit on a cliff, which
+is exactly what a supplementary table should document.
+
+**Plateau selection.** `filter_direction()` used `all(diff(ages) >= 0)`, a
+perfect-monotonicity test that fails on 11.5 % of 3-plateau and 26.5 % of
+5-plateau sequences at only 2 % noise, and then collapsed to "first plateau +
+smallest variance" (at most two). It now keeps the **longest monotonic
+subsequence** with a tolerance (`direction_method = "monotonic"`, default), so
+every plateau consistent with the trend is retained.
+`direction_method = "strict"` restores the old behaviour exactly.
+
+**Input validation.** `validate_segment_data()` reports missing columns, a Time
+axis that looks like milliseconds rather than seconds, non-monotonic time, and
+negative or older-than-Earth ages *inside the ablation window*. Structural
+problems skip the zircon with an actionable message; value problems warn only.
+
+**Robust pre-processing (opt-in).** `preprocess = "robust_loess"` drops the
+ARIMA outlier screen and fits `loess(family = "symmetric")`, so outliers are
+downweighted by an M-estimator instead of being deleted. Removes the least
+stable step in the pipeline.
+
+**Other.** `Plateau_Numbers` is now also available as `Total_Segments` (the old
+name was misleading: it is the number of PELT segments, not of confirmed
+plateaus); `Confirmed plateaus` added. Workaround note: `parallel` added to
+`Suggests` for multi-core sweeps.
+
 ### 1.1.0
 
 **Dependency removal.** The package now runs on base R alone. `ggplot2`,

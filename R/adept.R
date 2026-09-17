@@ -20,9 +20,15 @@ ADEPT_BASE_COLS <- c(
   "Variance",
   "Calibration uncertainty", "Plateau uncertainty", "Total uncertainty",
   "Filter 1", "Filter 2", "Filter 3", "Filter 4",
-  "Total integration time numbers", "Plateau serial numbers",
+  "Total integration time numbers", "Total segments", "Plateau serial numbers",
   "Final integration time numbers", "Final serial number",
-  "Final age (Ma)", "Final total uncertainty (Ma)", "Concordance (%)",
+  "Final age (Ma)", "Final total uncertainty (Ma)",
+  "Final total uncertainty incl. decay (Ma)",
+  "Random uncertainty (Ma)", "Systematic uncertainty (Ma)",
+  "Decay constant uncertainty (Ma)", "Decay system",
+  "Relative uncertainty (%)",
+  "Confirmed plateaus",
+  "Concordance (%)",
   "Pb206/U238 age mean (Ma)", "Pb206/U238 total uncertainty (Ma)",
   "Pb207/U235 age mean (Ma)", "Pb207/U235 total uncertainty (Ma)",
   "Pb207/Pb206 age mean (Ma)", "Pb207/Pb206 total uncertainty (Ma)"
@@ -38,11 +44,17 @@ ADEPT_MCMC_OUT_COLS <- c(
   "Calibration uncertainty", "Plateau uncertainty", "Total uncertainty",
   "Plateau serial numbers",
   "Filter 1", "Filter 2", "Filter 3", "Filter 4",
-  "Final serial number", "Total integration time Numbers",
+  "Final serial number", "Total integration time Numbers", "Total segments",
   "MCMC mean", "MCMC lower", "MCMC upper", "MCMC sigma",
   "Rhat", "MCMC n.eff", "MCMC integration time",
   "Filter MCMC", "Final integration time numbers",
-  "Final age (Ma)", "Final total uncertainty (Ma)", "Concordance (%)",
+  "Final age (Ma)", "Final total uncertainty (Ma)",
+  "Final total uncertainty incl. decay (Ma)",
+  "Random uncertainty (Ma)", "Systematic uncertainty (Ma)",
+  "Decay constant uncertainty (Ma)", "Decay system",
+  "Relative uncertainty (%)",
+  "Confirmed plateaus",
+  "Concordance (%)",
   "Pb206/U238 age mean (Ma)", "Pb206/U238 total uncertainty (Ma)",
   "Pb207/U235 age mean (Ma)", "Pb207/U235 total uncertainty (Ma)",
   "Pb207/Pb206 age mean (Ma)", "Pb207/Pb206 total uncertainty (Ma)"
@@ -53,6 +65,12 @@ ADEPT_SUMMARY_COLS <- c(
   "Final serial number",
   "Integration time",
   "Final age (Ma)", "Final total uncertainty (Ma)",
+  "Final total uncertainty incl. decay (Ma)",
+  "Random uncertainty (Ma)", "Systematic uncertainty (Ma)",
+  "Decay constant uncertainty (Ma)", "Decay system",
+  "Relative uncertainty (%)",
+  "Confirmed plateaus",
+  "Total segments",
   "Concordance (%)",
   "Pb206/U238 age mean (Ma)", "Pb206/U238 total uncertainty (Ma)",
   "Pb207/U235 age mean (Ma)", "Pb207/U235 total uncertainty (Ma)",
@@ -127,6 +145,15 @@ adept_block <- function(seg, analysis_name, group_counter, n_points,
 
   set("Final age (Ma)",               col_of("Final_Age"))
   set("Final total uncertainty (Ma)", col_of("Final_total_uncertainty"))
+  set("Final total uncertainty incl. decay (Ma)",
+      col_of("Final_total_uncertainty_full"))
+  set("Random uncertainty (Ma)",          col_of("Random_uncertainty"))
+  set("Systematic uncertainty (Ma)",      col_of("Systematic_uncertainty"))
+  set("Decay constant uncertainty (Ma)",  col_of("Decay_constant_uncertainty"))
+  set("Decay system",                     chr_of("Decay_system"))
+  set("Relative uncertainty (%)",         col_of("Relative_uncertainty_pct"))
+  set("Confirmed plateaus",               col_of("Confirmed_Plateaus"))
+  set("Total segments",                   col_of("Total_Segments"))
   set("Concordance (%)",              col_of("Concordance"))
   set("Pb206/U238 age mean (Ma)",           col_of("Age68_Mean"))
   set("Pb206/U238 total uncertainty (Ma)",  col_of("Age68_Total_uncertainty"))
@@ -213,9 +240,14 @@ adept <- function(
     min_plateau_resolution    = NULL,
     variance_threshold        = 0.1192,
     filter_direction          = c("Forward", "Reverse"),
+    direction_method          = c("monotonic", "strict"),
+    direction_tolerance       = 0.02,
     outlier_method            = c("arima", "mad", "none"),
     outlier_sd                = 2,
+    preprocess                = c("arima_loess", "robust_loess"),
+    calibration_uncertainty   = 0.03,
     u238u235                  = ADEPT_U238U235,
+    validate_input            = TRUE,
     mcmc                      = FALSE,
     make_plots                = TRUE,
     save_plots_to_disk        = TRUE,
@@ -226,8 +258,17 @@ adept <- function(
     verbose                   = TRUE,
     plot                      = TRUE
 ) {
-  filter_direction <- match.arg(filter_direction)
-  outlier_method   <- match.arg(outlier_method)
+  filter_direction  <- match.arg(filter_direction)
+  direction_method  <- match.arg(direction_method)
+  outlier_method    <- match.arg(outlier_method)
+  preprocess        <- match.arg(preprocess)
+
+  if (!is.numeric(calibration_uncertainty) ||
+      length(calibration_uncertainty) != 1L ||
+      !is.finite(calibration_uncertainty) || calibration_uncertainty < 0) {
+    stop("`calibration_uncertainty` must be a single non-negative number ",
+         "(it is a relative 1-sigma, e.g. 0.03 for 3 %).", call. = FALSE)
+  }
 
   if (!missing(plot) && missing(make_plots)) make_plots <- isTRUE(plot)
   if (!is.null(progress) && !is.function(progress)) {
@@ -329,6 +370,24 @@ adept <- function(
       extra_names  <- parsed$extra_names
       extra_raw    <- parsed$extra_data
 
+      if (isTRUE(validate_input)) {
+        problems <- validate_segment_data(
+          segment.data,
+          label = sprintf("'%s' rows %d-%d", sheet_name, start_row, end_row))
+        # Only structural problems are fatal: a missing age column or a Time
+        # axis that looks like milliseconds means the pipeline cannot run.
+        fatal <- grepl("no recognisable|not monotonically|not numeric|is not numeric",
+                       problems)
+        if (any(fatal)) {
+          warning(sprintf("Sheet '%s' rows %d-%d: %s", sheet_name,
+                          start_row, end_row,
+                          paste(problems[fatal], collapse = "; ")),
+                  call. = FALSE)
+          finish(0, "failed validation")
+          next
+        }
+      }
+
       segment.data$.ROWID. <- seq_len(nrow(segment.data))
       if (length(extra_names) > 0 && !is.null(extra_raw)) {
         extra_raw$.ROWID. <- seq_len(nrow(extra_raw))
@@ -358,6 +417,19 @@ adept <- function(
         next
       }
 
+      if (isTRUE(validate_input)) {
+        problems <- validate_segment_data(
+          subset_data,
+          label = sprintf("'%s' rows %d-%d (ablation window)", sheet_name,
+                          start_row, end_row),
+          check_values = TRUE)
+        if (length(problems) > 0L) {
+          warning(sprintf("Sheet '%s' rows %d-%d (ablation window): %s",
+                          sheet_name, start_row, end_row,
+                          paste(problems, collapse = "; ")), call. = FALSE)
+        }
+      }
+
       subset_data$Raw_Age <- ifelse(subset_data$Age68 < 1000,
                                     subset_data$Age68,
                                     ifelse(subset_data$Age76 > 1000,
@@ -371,9 +443,17 @@ adept <- function(
       }
 
       # ---- Preprocessing ----------------------------------------------------
-      subset_data$Age68 <- arima_outlier(subset_data$Age68, outlier_method, outlier_sd)
-      subset_data$Age75 <- arima_outlier(subset_data$Age75, outlier_method, outlier_sd)
-      subset_data$Age76 <- arima_outlier(subset_data$Age76, outlier_method, outlier_sd)
+      # arima_loess  : ARIMA residual screening, then an ordinary LOESS fit
+      #                (the published v1.x pipeline)
+      # robust_loess : skip the ARIMA screening entirely and let a robust
+      #                M-estimator LOESS downweight outliers instead. Fewer
+      #                steps, no model-order selection, no hard deletion of
+      #                points.
+      if (identical(preprocess, "arima_loess")) {
+        subset_data$Age68 <- arima_outlier(subset_data$Age68, outlier_method, outlier_sd)
+        subset_data$Age75 <- arima_outlier(subset_data$Age75, outlier_method, outlier_sd)
+        subset_data$Age76 <- arima_outlier(subset_data$Age76, outlier_method, outlier_sd)
+      }
       subset_data <- discordance_filter(subset_data)
       subset_data$subset_Age68 <- mean_fill(subset_data$subset_Age68,
                                             subset_data$Age68)
@@ -405,7 +485,10 @@ adept <- function(
       }
 
       # ---- LOESS ------------------------------------------------------------
-      subset_data <- loess_segment(subset_data, span = 0.15)
+      subset_data <- loess_segment(
+        subset_data, span = 0.15,
+        family = if (identical(preprocess, "robust_loess")) "symmetric" else "gaussian"
+      )
       if (nrow(subset_data) == 0 ||
           sum(!is.na(subset_data$standardized_loess)) < 10) {
         finish(nrow(subset_data), "LOESS failed")
@@ -433,7 +516,8 @@ adept <- function(
       # ---- Plateau statistics (vectorised) ----------------------------------
       segments <- calc_slopes(subset_data, segments, seg_starts, seg_ends)
       segments$Variance <- calc_variance(subset_data, seg_starts, seg_ends)
-      segments <- calc_uncertainty(segments, subset_data, seg_starts, seg_ends)
+      segments <- calc_uncertainty(segments, subset_data, seg_starts, seg_ends,
+                                   calibration_uncertainty = calibration_uncertainty)
       segments <- calc_extra_means(segments, subset_data, extra_names,
                                    seg_starts, seg_ends)
       segments <- calc_age_means(segments, subset_data, seg_starts, seg_ends)
@@ -444,7 +528,9 @@ adept <- function(
                                 max_age       = max_age_limit,
                                 var_threshold = variance_threshold,
                                 min_res       = min_plateau_resolution,
-                                direction     = filter_direction)
+                                direction     = filter_direction,
+                                direction_method    = direction_method,
+                                direction_tolerance = direction_tolerance)
 
       n_confirmed <- sum(!is.na(segments$Filter_4))
       if (isTRUE(verbose)) {

@@ -12,9 +12,14 @@ adept(
   min_plateau_resolution = NULL,
   variance_threshold = 0.1192,
   filter_direction = c("Forward", "Reverse"),
+  direction_method = c("monotonic", "strict"),
+  direction_tolerance = 0.02,
   outlier_method = c("arima", "mad", "none"),
   outlier_sd = 2,
+  preprocess = c("arima_loess", "robust_loess"),
+  calibration_uncertainty = 0.03,
   u238u235 = ADEPT_U238U235,
+  validate_input = TRUE,
   mcmc = FALSE,
   make_plots = TRUE,
   save_plots_to_disk = TRUE,
@@ -49,12 +54,38 @@ because the onset of the ablation signal is usually truncated by
 \item{filter_direction}{\code{"Forward"} keeps ascending age sequences;
 \code{"Reverse"} keeps descending age sequences.}
 
+\item{direction_method}{\code{"monotonic"} (default) keeps the longest set of
+plateaus whose ages follow the requested trend, tolerating reversals smaller
+than \code{direction_tolerance}. \code{"strict"} reproduces the v1.1.0
+behaviour, which required a perfectly monotonic sequence and otherwise fell
+back to the first plateau plus the one with the smallest variance (at most two
+plateaus).}
+
+\item{direction_tolerance}{Relative reversal tolerated by
+\code{direction_method = "monotonic"} (default 0.02, i.e. 2 \%).}
+
 \item{outlier_method}{Outlier detection applied before smoothing:
 \code{"arima"} (default, matches the published method), \code{"mad"}
-(fast robust z-score) or \code{"none"}.}
+(fast robust z-score) or \code{"none"}. Ignored when
+\code{preprocess = "robust_loess"}.}
 
 \item{outlier_sd}{Threshold, in residual standard deviations, beyond which a
 point is discarded (default 2).}
+
+\item{preprocess}{\code{"arima_loess"} (default, the published pipeline:
+ARIMA residual screening followed by an ordinary LOESS fit) or
+\code{"robust_loess"}, which skips the ARIMA screen entirely and fits
+\code{loess(family = "symmetric")} so that outliers are downweighted rather
+than deleted.}
+
+\item{calibration_uncertainty}{Relative 1-sigma reproducibility of the primary
+reference material (default 0.03, i.e. 3 \%). It dominated the reported total
+uncertainty, so it is now an explicit parameter rather than a literal buried
+in the code.}
+
+\item{validate_input}{Logical. Run the input sanity checks (required columns,
+monotonic and plausibly scaled Time axis, usable age values) and report
+actionable problems? (default \code{TRUE}).}
 
 \item{u238u235}{238U/235U ratio used to derive 235U for count-based input
 (default 137.818).}

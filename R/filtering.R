@@ -56,59 +56,105 @@ filter_resolution <- function(segments, filter_2, min_res = NULL,
   result
 }
 
+#' Longest monotonic subsequence (kept indices)
+#'
+#' Dynamic programming over the plateau ages. Used to keep the largest set of
+#' plateaus that is consistent with the expected age trend, instead of
+#' collapsing to two hand-picked plateaus.
+#'
+#' @param a Numeric vector of plateau ages.
+#' @param increasing TRUE for a forward (age increasing) trend.
+#' @param tol Allowed relative reversal; a step of up to \code{tol * a[i]}
+#'   against the trend still counts as monotonic.
+#' @return Integer vector of indices, in ascending order.
+#' @keywords internal
+longest_monotonic <- function(a, increasing = TRUE, tol = 0) {
+  n <- length(a)
+  if (n == 0L) return(integer(0))
+  if (n == 1L) return(1L)
+
+  ok <- function(i, j) {
+    # i comes before j
+    if (increasing) a[j] >= a[i] * (1 - tol) else a[j] <= a[i] * (1 + tol)
+  }
+
+  dp   <- rep(1L, n)
+  prev <- rep(0L, n)
+  for (j in seq_len(n)[-1]) {
+    for (i in seq_len(j - 1L)) {
+      if (ok(i, j) && dp[i] + 1L > dp[j]) {
+        dp[j]   <- dp[i] + 1L
+        prev[j] <- i
+      }
+    }
+  }
+  k <- which.max(dp)
+  out <- integer(0)
+  while (k > 0L) {
+    out <- c(k, out)
+    k <- prev[k]
+  }
+  out
+}
+
 #' Step 4: Directional plateau selection (Forward / Reverse)
 #'
-#' Forward: keep all ascending plateaus; if not ascending, keep the first
-#'   (youngest) plateau. If volatile, additionally keep the most stable.
-#' Reverse: keep all descending plateaus; if not descending, keep the first
-#'   (youngest) plateau. If volatile, additionally keep the most stable.
+#' Forward: keep the largest set of plateaus whose ages do not decrease.
+#' Reverse: keep the largest set whose ages do not increase.
+#'
+#' Two methods are available:
+#'   "monotonic" (default) — longest monotonic subsequence, with a tolerance
+#'     so that sub-analytical reversals do not break the trend. This keeps
+#'     every plateau that is consistent with the trend.
+#'   "strict" — the original v1.1.0 behaviour: require a perfectly monotonic
+#'     sequence, otherwise fall back to the first plateau plus the one with
+#'     the smallest variance (at most two plateaus). Kept for reproducing
+#'     earlier results.
 #'
 #' @param segments Segment data.frame
 #' @param filter_3 Result from filter_resolution()
 #' @param direction "Forward" (keep ascending) or "Reverse" (keep descending)
+#' @param method "monotonic" (default) or "strict"
+#' @param tol Relative reversal tolerated by the "monotonic" method
 #' @return Numeric vector (Filter_4): final age value or NA
 #' @keywords internal
-filter_direction <- function(segments, filter_3, direction = c("Forward", "Reverse")) {
+filter_direction <- function(segments, filter_3,
+                             direction = c("Forward", "Reverse"),
+                             method = c("monotonic", "strict"),
+                             tol = 0.02) {
   direction <- match.arg(direction)
-  NO_NULL_Age <- filter_3[!is.na(filter_3)]
-  filter_4 <- rep(NA, nrow(segments))
+  method    <- match.arg(method)
+  filter_4  <- rep(NA_real_, nrow(segments))
 
-  if (length(NO_NULL_Age) == 0) return(filter_4)
+  keep_idx <- which(!is.na(filter_3))
+  if (length(keep_idx) == 0L) return(filter_4)
+  vals <- as.numeric(filter_3[keep_idx])
+  increasing <- identical(direction, "Forward")
 
-  is_ascending  <- all(diff(NO_NULL_Age, na.rm = TRUE) >= 0)
-  is_descending <- all(diff(NO_NULL_Age, na.rm = TRUE) < 0)
-
-  if (direction == "Forward") {
-    if (is_ascending) {
-      filter_4 <- filter_3
-    } else {
-      first_idx <- which(filter_3 == NO_NULL_Age[1])[1]
-      filter_4[first_idx] <- NO_NULL_Age[1]
-      if (!is_descending) {
-        remaining <- which(!is.na(filter_3) & is.na(filter_4))
-        if (length(remaining) > 0) {
-          best_idx <- remaining[which.min(segments$Variance[remaining])]
-          filter_4[best_idx] <- filter_3[best_idx]
-        }
+  if (identical(method, "strict")) {
+    # ---- original v1.1.0 behaviour -----------------------------------------
+    is_ascending  <- all(diff(vals) >= 0)
+    is_descending <- all(diff(vals) < 0)
+    if ((increasing && is_ascending) || (!increasing && is_descending)) {
+      filter_4[keep_idx] <- vals
+      return(filter_4)
+    }
+    filter_4[keep_idx[1]] <- vals[1]
+    other <- if (increasing) !is_descending else !is_ascending
+    if (other) {
+      remaining <- keep_idx[-1]
+      if (length(remaining) > 0L) {
+        best <- remaining[which.min(segments$Variance[remaining])]
+        filter_4[best] <- filter_3[best]
       }
     }
-  } else {  # Reverse
-    if (is_descending) {
-      filter_4 <- filter_3
-    } else {
-      first_idx <- which(filter_3 == NO_NULL_Age[1])[1]
-      filter_4[first_idx] <- NO_NULL_Age[1]
-      if (!is_ascending) {
-        remaining <- which(!is.na(filter_3) & is.na(filter_4))
-        if (length(remaining) > 0) {
-          best_idx <- remaining[which.min(segments$Variance[remaining])]
-          filter_4[best_idx] <- filter_3[best_idx]
-        }
-      }
-    }
+    return(filter_4)
   }
 
-  return(filter_4)
+  # ---- v1.2.0: longest monotonic subsequence -------------------------------
+  sel <- longest_monotonic(vals, increasing = increasing, tol = tol)
+  filter_4[keep_idx[sel]] <- vals[sel]
+  filter_4
 }
 
 #' Apply all four filtering steps
@@ -122,22 +168,36 @@ filter_direction <- function(segments, filter_3, direction = c("Forward", "Rever
 #' @keywords internal
 apply_filters <- function(segments, min_age = 0, max_age = 4540,
                           var_threshold = 0.1192, min_res = NULL,
-                          direction = c("Forward", "Reverse")) {
-  direction <- match.arg(direction)
+                          direction = c("Forward", "Reverse"),
+                          direction_method = c("monotonic", "strict"),
+                          direction_tolerance = 0.02) {
+  direction        <- match.arg(direction)
+  direction_method <- match.arg(direction_method)
 
   segments$Filter_1 <- filter_age_range(segments, min_age, max_age)
   segments$Filter_2 <- filter_variance(segments, segments$Filter_1, var_threshold)
   segments$Filter_3 <- filter_resolution(segments, segments$Filter_2, min_res)
-  segments$Filter_4 <- filter_direction(segments, segments$Filter_3, direction)
+  segments$Filter_4 <- filter_direction(segments, segments$Filter_3, direction,
+                                        method = direction_method,
+                                        tol = direction_tolerance)
 
   segments$Final_total_uncertainty <- ifelse(!is.na(segments$Filter_4),
                                              segments$Total_uncertainty, NA)
-  segments$Plateau_Numbers <- length(segments$Filter_4)
+  # v1.2.0: the uncertainty that includes the decay constants
+  segments$Final_total_uncertainty_full <-
+    ifelse(!is.na(segments$Filter_4), segments$Total_uncertainty_full, NA)
+
+  # v1.2.0 rename: the old name was misleading, it is the total number of
+  # segments produced by PELT, not the number of confirmed plateaus.
+  segments$Total_Segments  <- nrow(segments)
+  segments$Plateau_Numbers <- nrow(segments)   # kept for backwards compat
+
   segments$Final_Serial_Number <- NA
   non_na <- which(!is.na(segments$Filter_4))
   segments$Final_Serial_Number[non_na] <- seq_along(non_na)
   segments$Final_Age <- segments$Filter_4
   segments$Final_step_Numbers <- sum(!is.na(segments$Filter_4))
+  segments$Confirmed_Plateaus <- sum(!is.na(segments$Filter_4))
 
   return(segments)
 }

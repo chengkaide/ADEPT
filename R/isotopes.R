@@ -12,6 +12,77 @@ ADEPT_LAMBDA235 <- 9.8485e-10    # Jaffey et al. (1971)
 ADEPT_U238U235  <- 137.818       # Hiess et al. (2012)
 ADEPT_EARTH_AGE <- 4.567e9       # yr, upper bracket for the 207/206 solve
 
+# ---------------------------------------------------------------------------
+#  Uncertainty of the decay constants
+# ---------------------------------------------------------------------------
+# IsoplotR stores lambda in Ma^-1, so its quoted 1-sigma values are per Ma:
+#   U238 : 1.55125e-4 +- 8.3e-8   -> relative 1-sigma 5.3505e-4
+#   U235 : 9.84850e-4 +- 6.7e-7   -> relative 1-sigma 6.8031e-4
+#   U238U235 : 137.818 +- 0.0225  -> relative 1-sigma 1.6326e-4
+# The relative values are unit-independent, so they are stored directly to
+# avoid any Ma / yr confusion.
+ADEPT_LAMBDA238_REL_1S <- 8.3e-08 / 1.55125e-04    # 0.0535 %
+ADEPT_LAMBDA235_REL_1S <- 6.7e-07 / 9.84850e-04    # 0.0680 %
+ADEPT_U238U235_REL_1S  <- 0.0225  / 137.818        # 0.0163 %
+
+#' Relative 1-sigma decay-constant uncertainty of an age
+#'
+#' For 206Pb/238U and 207Pb/235U the age is exactly inversely proportional to
+#' the decay constant, so the relative uncertainty is just that of lambda.
+#'
+#' For 207Pb/206Pb the ratio couples lambda235, lambda238 and 238U/235U, and
+#' what matters is how the *age* responds - not how the ratio responds. Using
+#' the implicit function theorem on
+#'   r = (1/u) * (exp(l235 t) - 1) / (exp(l238 t) - 1)
+#' the log-elasticities are
+#'   a235 =  l235 * t * E235 / (E235 - 1)
+#'   a238 = -l238 * t * E238 / (E238 - 1)
+#'   au   = -1
+#'   b    = a235 + a238            (d ln r / d ln t)
+#' so   sigma_ln t = sqrt( sum_i (a_i / b)^2 * sigma_ln(param_i)^2 ).
+#'
+#' The two terms partly cancel in b, which is why 207Pb/206Pb ages are far less
+#' sensitive to decay-constant uncertainty than 206Pb/238U ages - the numerical
+#' result (about 0.15 % at 2 Ga) reflects that. Note the value is
+#' age-dependent, so it is evaluated per plateau rather than as a constant.
+#'
+#' @param system Character vector: "Age68", "Age75" or "Age76".
+#' @param age Numeric vector of ages in Ma (used only for "Age76").
+#' @return Numeric vector of relative (fractional) 1-sigma uncertainties.
+#' @keywords internal
+adept_decay_rel_1s <- function(system, age = NA_real_) {
+  n <- max(length(system), length(age))
+  system <- rep_len(system, n)
+  age    <- rep_len(age, n)
+  out    <- rep(NA_real_, n)
+
+  out[system %in% c("Age68", "Pb206U238", "Pb206_U238")] <-
+    ADEPT_LAMBDA238_REL_1S
+  out[system %in% c("Age75", "Pb207U235", "Pb207_U235")] <-
+    ADEPT_LAMBDA235_REL_1S
+
+  i76 <- which(system %in% c("Age76", "Pb207Pb206", "Pb207_Pb206"))
+  if (length(i76)) {
+    t <- age[i76] * 1e6                      # Ma -> yr
+    ok <- is.finite(t) & t > 0
+    val <- rep(NA_real_, length(t))
+    if (any(ok)) {
+      tt <- t[ok]
+      l238 <- ADEPT_LAMBDA238; l235 <- ADEPT_LAMBDA235
+      E238 <- exp(l238 * tt); E235 <- exp(l235 * tt)
+      a235 <-  l235 * tt * E235 / (E235 - 1)
+      a238 <- -l238 * tt * E238 / (E238 - 1)
+      b    <- a235 + a238
+      val[ok] <- sqrt(
+        (a238 / b)^2 * ADEPT_LAMBDA238_REL_1S^2 +
+        (a235 / b)^2 * ADEPT_LAMBDA235_REL_1S^2 +
+        (1 / b)^2    * ADEPT_U238U235_REL_1S^2)
+    }
+    out[i76] <- val
+  }
+  out
+}
+
 #' 206Pb/238U age (Ma)
 #'
 #' Vectorised; solves `R = exp(lambda238 * t) - 1`.
