@@ -42,7 +42,7 @@ adept_gui <- function(host = "127.0.0.1", port = NULL,
   }
 
   if (!requireNamespace("DT", quietly = TRUE)) {
-    message("提示：安装 DT 可获得可排序 / 可导出的交互式表格。\n",
+    message("Note: installing DT adds sortable, exportable result tables.\n",
             "  install.packages(\"DT\")")
   }
 

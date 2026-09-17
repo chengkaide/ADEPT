@@ -181,11 +181,17 @@ apply_filters <- function(segments, min_age = 0, max_age = 4540,
                                         method = direction_method,
                                         tol = direction_tolerance)
 
-  segments$Final_total_uncertainty <- ifelse(!is.na(segments$Filter_4),
-                                             segments$Total_uncertainty, NA)
+  # Uncertainty columns are optional: the cascade is also used on segment
+  # tables that carry only means and variances (e.g. in tests or by callers
+  # that assemble their own segments). Fall back to NA rather than failing.
+  unc_col <- function(col) {
+    if (col %in% names(segments)) segments[[col]] else rep(NA_real_, nrow(segments))
+  }
+  kept <- !is.na(segments$Filter_4)
+
+  segments$Final_total_uncertainty      <- ifelse(kept, unc_col("Total_uncertainty"), NA_real_)
   # v1.2.0: the uncertainty that includes the decay constants
-  segments$Final_total_uncertainty_full <-
-    ifelse(!is.na(segments$Filter_4), segments$Total_uncertainty_full, NA)
+  segments$Final_total_uncertainty_full <- ifelse(kept, unc_col("Total_uncertainty_full"), NA_real_)
 
   # v1.2.0 rename: the old name was misleading, it is the total number of
   # segments produced by PELT, not the number of confirmed plateaus.

@@ -1,0 +1,213 @@
+---
+title: "Getting started with ADEPT"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Getting started with ADEPT}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment  = "#>",
+  fig.width = 7,
+  fig.height = 4.2
+)
+```
+
+```{r}
+library(ADEPT)
+```
+
+## What ADEPT does
+
+LA-ICP-MS depth profiling acquires a time series of U-Pb isotope ratios as the
+laser drills into a zircon. Downhole fractionation and real age differences
+both make the apparent age drift, so choosing "the age" means deciding *where*
+in the profile the signal is a plateau.
+
+ADEPT automates that decision:
+
+1. discard outlying ages,
+2. smooth the series with LOESS and standardise it,
+3. segment it with PELT changepoint detection,
+4. filter the segments to a set of plateaus consistent with the expected age
+   trend,
+5. report an age and a full uncertainty budget for each plateau.
+
+The method is described in Wang et al. (2026), *JGR: Solid Earth*.
+
+## Input data
+
+Three formats are accepted, distinguished by column names. Column names must
+match exactly, including case.
+
+| Format | Required columns |
+|---|---|
+| 1. Direct ages | `Age68`, `Age75`, `Age76` |
+| 2. Raw isotope counts | `Pb206`, `Pb207`, `U238` |
+| 3. Isotopic ratios | `Pb206_U238`, `Pb207_U235`, `Pb207_Pb206` |
+
+All three need `Analysis` (sample name) and `Time` (seconds). Any extra numeric
+columns are summarised per plateau and carried into the output. Formats 2 and 3
+are converted with the decay constants and the ²³⁸U/²³⁵U ratio used by
+IsoplotR, so the ages match what you would get there.
+
+## A first run
+
+```{r}
+input <- system.file("extdata", "Input(1sample).xlsx", package = "ADEPT")
+result <- adept(input, output_path = NA, make_plots = FALSE, verbose = FALSE)
+```
+
+`output_path = NA` keeps everything in memory. Normally `adept()` also writes a
+two-sheet Excel workbook (all segments, and a summary of the confirmed
+plateaus) and a PDF per zircon.
+
+```{r}
+result$summary[, c("Final serial number", "Integration time",
+                   "Final age (Ma)",
+                   "Final total uncertainty incl. decay (Ma)",
+                   "Confirmed plateaus")]
+```
+
+## Reading the depth profile
+
+`keep_profiles = TRUE` returns the smoothed series and the plateau table per
+zircon, which is what you need for a figure.
+
+```{r fig.height = 3.6}
+r <- adept(input, output_path = NA, make_plots = TRUE, keep_profiles = TRUE,
+           verbose = FALSE)
+# the objects in $plots carry a print() method that draws the profile
+r$plots[[1]]
+```
+
+Orange dots are the raw ²⁰⁶Pb/²³⁸U ages, the black line is the LOESS trend, and
+each red bar is a confirmed plateau with its uncertainty band.
+
+## The uncertainty budget
+
+This is the part worth reading carefully. Each plateau comes with a
+decomposition, because "± 0.7 Ma" on its own does not tell a reader whether
+that number was measured or assumed.
+
+```{r}
+keep <- !is.na(result$summary[["Final age (Ma)"]])
+result$summary[keep, c("Final age (Ma)",
+                       "Random uncertainty (Ma)",
+                       "Systematic uncertainty (Ma)",
+                       "Decay constant uncertainty (Ma)",
+                       "Relative uncertainty (%)")]
+```
+
+- **Random** is what you compare ages with inside a session: the scatter of the
+  points inside the plateau, plus the reproducibility of the primary reference
+  material (`calibration_uncertainty`, 3 % by default).
+- **Systematic** is the decay-constant contribution. It is fully correlated
+  between samples, so it does not cancel when you average ages.
+
+On this example the reference-material term dominates: the measured
+within-plateau scatter contributes only a few percent of the total. **The
+default 3 % is an assumption, not a measurement** — replace it with your
+laboratory's long-term reproducibility before quoting the age, and say where
+the number came from.
+
+```{r}
+smaller <- adept(input, calibration_uncertainty = 0.015,
+                 output_path = NA, make_plots = FALSE, verbose = FALSE)
+data.frame(assumed = c("3 %", "1.5 %"),
+           random = c(result$summary[["Random uncertainty (Ma)"]][1],
+                      smaller$summary[["Random uncertainty (Ma)"]][1]),
+           age = result$summary[["Final age (Ma)"]][1])
+```
+
+The age itself does not move; only the uncertainty does.
+
+## Choosing the parameters, and knowing how much they matter
+
+Two parameters control how many plateaus you get:
+
+- `variance_threshold` (default 0.1192) — how internally consistent a segment
+  has to be;
+- `min_plateau_resolution` (default 5 s) — how long a plateau has to last.
+
+Both defaults sit close to a cliff. `adept_sensitivity()` maps out the
+neighbourhood so you can report it rather than discover it in review.
+
+```{r}
+s <- adept_sensitivity(input,
+                       variance_threshold = c(0.08, 0.1192, 0.25),
+                       min_plateau_resolution = c(5, 10),
+                       filter_direction = "Forward",
+                       verbose = FALSE)
+s[, c("variance_threshold", "min_plateau_resolution", "n_plateaus", "ages")]
+```
+
+Put a table like this in your supplementary material. If the plateau count
+changes from 0 to 4 across a plausible range of a parameter, the reader
+deserves to know.
+
+`filter_direction` is the third choice: `"Forward"` keeps ages that increase
+downhole, `"Reverse"` keeps ages that decrease. It is not a cosmetic switch —
+on this example Forward returns three plateaus and Reverse returns one — so it
+has to be justified from the CL images, not from which answer you prefer.
+
+## Pre-processing options
+
+Two pipelines are available:
+
+- `preprocess = "arima_loess"` (default) — screen outliers with an ARIMA
+  residual test, then fit an ordinary LOESS.
+- `preprocess = "robust_loess"` — skip the screening and fit
+  `loess(family = "symmetric")`, which downweights outliers instead of deleting
+  them. This removes the least stable step, since it has no model-order search
+  to go wrong.
+
+```{r}
+rb <- adept(input, preprocess = "robust_loess", output_path = NA,
+            make_plots = FALSE, verbose = FALSE)
+data.frame(preprocess = c("arima_loess", "robust_loess"),
+           plateaus = c(nrow(result$summary), nrow(rb$summary)),
+           ages = c(paste(signif(result$summary[["Final age (Ma)"]], 6),
+                          collapse = "; "),
+                    paste(signif(rb$summary[["Final age (Ma)"]], 6),
+                          collapse = "; ")))
+```
+
+Run both and report the comparison. If the geological conclusion changes
+between them, the conclusion was never robust.
+
+## Bayesian posterior (optional)
+
+`mcmc = TRUE` adds a piecewise-linear changepoint posterior via the `mcp`
+package (which needs JAGS). It is entirely optional: without `mcp` installed
+the MCMC columns are `NA` and the rest of the pipeline runs normally.
+
+## Before you interpret the ages
+
+A plateau is the best piecewise-constant description of the data under the
+parameters you chose. That is not the same as a geological event.
+
+For zircons that have experienced multi-stage disturbance — uranium ore,
+hydrothermally altered grains — the U-Pb system may not have behaved as a
+closed system in any interval, and no amount of segmentation will recover a
+meaningful age. Always check the plateaus against CL/BSE imaging and the trace
+element profiles (`Th_U_Mean`, `Pb_Mean` and friends are carried through for
+exactly this).
+
+Where the package can help it does: ages outside 0–4568 Ma, non-monotonic
+`Time`, and a `Time` axis that looks like milliseconds are all reported before
+the model is fitted.
+
+## References
+
+- Wang, Y. et al. (2026). Automated Depth Profiling Technique. *JGR: Solid
+  Earth*, 131, e2025JB033324.
+- Jaffey, A. H. et al. (1971). Precision measurement of half-lives and specific
+  activities of ²³⁵U and ²³⁸U. *Physical Review C*, 4, 1889.
+- Hiess, J. et al. (2012). ²³⁸U/²³⁵U systematics in terrestrial uranium-bearing
+  minerals. *Science*, 335, 1610.
+- Killick, R., Fearnhead, P. & Eckley, I. A. (2012). Optimal detection of
+  changepoints with a linear computational cost. *JASA*, 107, 1590.

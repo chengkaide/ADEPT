@@ -4,6 +4,7 @@
 ^\.RData$
 ^\.Ruserdata$
 ^revdep$
+^\.github$
 ^.*\.tar\.gz$
 ^.*\.check$
 ^man/figures$

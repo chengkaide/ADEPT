@@ -221,7 +221,7 @@ adept_blank_block <- function(analysis_name, group_counter, n_points, out_cols) 
 #'   \code{plots} and (optionally) \code{profiles}.
 #'
 #' @export
-#' @importFrom stats loess predict var sd residuals lm coef complete.cases median mad
+#' @importFrom stats loess predict var sd residuals lm coef complete.cases median mad setNames
 #' @importFrom utils head
 #'
 #' @examples
@@ -534,7 +534,7 @@ adept <- function(
 
       n_confirmed <- sum(!is.na(segments$Filter_4))
       if (isTRUE(verbose)) {
-        message(sprintf("[%d/%d] %s — %d plateau(s) confirmed (%s)",
+        message(sprintf("[%d/%d] %s - %d plateau(s) confirmed (%s)",
                         i, n_groups, as.character(subset_data[1, "Analysis"]),
                         n_confirmed, filter_direction))
       }
@@ -571,7 +571,7 @@ adept <- function(
 
       done_units <- done_units + 1
       report(done_units / total_units,
-             sprintf("%s #%d — %d plateau(s)", sheet_name, i, n_confirmed))
+             sprintf("%s #%d - %d plateau(s)", sheet_name, i, n_confirmed))
       group_counter <- group_counter + 1
     }
   }

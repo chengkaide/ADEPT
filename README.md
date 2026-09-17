@@ -215,6 +215,33 @@ Input Excel → Format Detection → ARIMA Outliers → Discordance Filter
 → Plateau Statistics → 4-Step Filtering → [MCMC] → Output
 ```
 
+## Development
+
+The package ships a regression test suite and a CI workflow. Both were added
+because every bug found in this code so far was found by hand: a PELT pruning
+error at `minseglen > 1`, and a per-Ma/per-year mix-up in the decay-constant
+uncertainty.
+
+```r
+# from a source checkout
+testthat::test_local()
+```
+
+`tests/testthat/` covers the parts that are easy to get subtly wrong and hard
+to notice:
+
+| file | what it pins down |
+|---|---|
+| `test-isotopes.R` | the U-Pb conversions against hand calculations, and that the decay-constant uncertainties are relative (dimensionless) values |
+| `test-pelt.R` | changepoint vectors confirmed against `changepoint::cpt.mean()`, and that every segment respects `minseglen` |
+| `test-segstats.R` | the vectorised prefix-sum statistics against the `sapply` + `lm()` loops they replaced |
+| `test-filtering.R` | the four-step cascade, including the two-plateau collapse that v1.2.0 removed |
+| `test-xlsx.R` | the base-R OOXML reader and writer round trip |
+| `test-adept.R` | end-to-end runs on the bundled example workbook, with the published ages hard-coded as the anchor |
+
+`.github/workflows/R-CMD-check.yaml` runs `R CMD check` on Ubuntu, macOS and
+Windows, for the current and the previous R release.
+
 ## Changelog
 
 ### 1.2.0
