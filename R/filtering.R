@@ -38,11 +38,21 @@ filter_variance <- function(segments, filter_1, threshold = 0.1192) {
 #' @param min_res Minimum plateau duration in seconds (NULL or < 5 defaults to 5)
 #' @return Numeric vector (Filter_3): age value or NA
 #' @keywords internal
-filter_resolution <- function(segments, filter_2, min_res = NULL) {
-  if (is.null(min_res) || is.na(min_res) || min_res < 5) min_res <- 5
+filter_resolution <- function(segments, filter_2, min_res = NULL,
+                              skip_first = TRUE) {
+  if (is.null(min_res) || length(min_res) != 1 || is.na(min_res) ||
+      min_res < 5) min_res <- 5
+
   result <- filter_2
-  result[-1] <- ifelse(as.numeric(segments$Time_step[-1]) >= min_res,
-                       filter_2[-1], NA)
+  n <- nrow(segments)
+  if (n <= 1) return(result)   # nothing to compare / single segment
+
+  # NOTE: the first segment is exempt from the minimum-duration rule.
+  # It carries the onset of the ablation signal, which is often truncated
+  # by `lower_ablation_time` and would otherwise always be discarded.
+  idx <- if (isTRUE(skip_first)) 2:n else seq_len(n)
+  result[idx] <- ifelse(as.numeric(segments$Time_step[idx]) >= min_res,
+                        filter_2[idx], NA)
   result
 }
 

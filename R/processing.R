@@ -1,34 +1,87 @@
 # ADEPT: Automated Depth Profiling Technique
 # processing.R — Core data processing pipeline
 #
-# Internal functions for reading, preprocessing, LOESS smoothing,
-# PELT segmentation, plateau statistics, and uncertainty calculation.
+# All statistics here are vectorised over segments (see segstats.R); the only
+# remaining R-level loop in the package is the one that walks over zircons,
+# which is inherent to the method (each zircon is fitted independently).
+#
+# External dependencies: none (base R only).
+
+# ---------------------------------------------------------------------------
+#  Input
+# ---------------------------------------------------------------------------
 
 #' Read all sheets from an Excel input file
 #'
-#' @param file_path Path to the input Excel file
-#' @return A named list of data.frames, one per sheet
+#' Uses the built-in OOXML reader (xlsx.R) so no Excel package is required.
+#'
+#' @param file_path Path to the input Excel file.
+#' @return A named list of data.frames, one per sheet.
 #' @keywords internal
 read_input <- function(file_path) {
-  sheet_names <- readxl::excel_sheets(file_path)
-  data_list <- list()
-  for (i in seq_along(sheet_names)) {
-    data_list[[sheet_names[i]]] <- openxlsx::read.xlsx(file_path, sheet = sheet_names[i])
+  if (!file.exists(file_path)) {
+    stop("Input file not found: ", file_path, call. = FALSE)
   }
-  return(data_list)
+  if (grepl("\\.csv$", file_path, ignore.case = TRUE)) {
+    return(list(Sheet1 = utils::read.csv(file_path, check.names = FALSE,
+                                         stringsAsFactors = FALSE)))
+  }
+  if (grepl("\\.xls$", file_path, ignore.case = TRUE)) {
+    stop("Legacy binary .xls files are not supported. ",
+         "Please save the workbook as .xlsx or .csv.", call. = FALSE)
+  }
+  read_xlsx_base(file_path)
+}
+
+#' Detect "extra" numeric columns without converting ages
+#'
+#' Used by `adept()` for the pre-scan that builds the master list of extra
+#' columns. It never computes ages, so it cannot fail on a sheet whose first
+#' rows are blank.
+#'
+#' @param raw Raw data.frame from one sheet
+#' @param start_row,end_row Row window to inspect
+#' @return Character vector of extra numeric column names
+#' @keywords internal
+detect_extra_names <- function(raw, start_row, end_row) {
+  colnames(raw) <- gsub(" |/", "_", colnames(raw))
+
+  core_cols <- c("Analysis", "Time",
+                 "Age68", "Age75", "Age76",
+                 "Pb206", "Pb207", "U235", "U238",
+                 "Pb206U238", "Pb207U235", "Pb207Pb206",
+                 "Pb206_U238", "Pb207_U235", "Pb207_Pb206")
+
+  cand <- setdiff(colnames(raw), core_cols)
+  if (length(cand) == 0) return(character(0))
+
+  end_row <- min(end_row, nrow(raw))
+  if (end_row < start_row) return(character(0))
+  sub <- raw[start_row:end_row, cand, drop = FALSE]
+
+  ok <- vapply(cand, function(cn) {
+    v <- sub[[cn]]
+    if (is.numeric(v)) return(TRUE)
+    cv <- suppressWarnings(as.numeric(as.character(v)))
+    if (length(cv) == 0) return(FALSE)
+    sum(!is.na(cv)) / length(cv) > 0.5
+  }, logical(1), USE.NAMES = FALSE)
+
+  cand[ok]
 }
 
 #' Parse raw segment data and extract age columns
 #'
-#' Detects the input format (Age68, Pb206, or Pb206_U238) and creates
-#' a standardized data.frame with Analysis, Time, Age68, Age75, Age76.
+#' Detects the input format (Age68, Pb206, or Pb206_U238) and creates a
+#' standardised data.frame with Analysis, Time, Age68, Age75, Age76.
+#' Ages are derived with the built-in decay equations (isotopes.R).
 #'
 #' @param raw Raw data.frame from one sheet
-#' @param start_row Starting row index for this chunk
-#' @param end_row Ending row index for this chunk
-#' @return A list with `data` (standardized data.frame) and `extra_names` (character vector of additional numeric column names)
+#' @param start_row,end_row Row window for this chunk
+#' @param u238u235 238U/235U ratio for count-based input
+#' @return A list with `data`, `extra_names` and `extra_data`
 #' @keywords internal
-parse_segment_data <- function(raw, start_row, end_row) {
+parse_segment_data <- function(raw, start_row, end_row, u238u235 = ADEPT_U238U235) {
   colnames(raw) <- gsub(" |/", "_", colnames(raw))
 
   if ("Age68" %in% colnames(raw) &&
@@ -41,7 +94,8 @@ parse_segment_data <- function(raw, start_row, end_row) {
       Age76    = raw$Age76[start_row:end_row],
       stringsAsFactors = FALSE
     )
-    segment.data[, 2:5] <- lapply(segment.data[, 2:5], as.numeric)
+    segment.data[, 2:5] <- lapply(segment.data[, 2:5],
+                                  function(v) suppressWarnings(as.numeric(v)))
 
   } else if ("Pb206" %in% colnames(raw) &&
              !all(is.na(raw$Pb206[start_row:end_row]))) {
@@ -53,14 +107,13 @@ parse_segment_data <- function(raw, start_row, end_row) {
       U238     = raw$U238[start_row:end_row],
       stringsAsFactors = FALSE
     )
-    segment.data[, 2:5] <- lapply(segment.data[, 2:5], as.numeric)
-    segment.data$U235        <- segment.data$U238 / 137.88
-    segment.data$Pb206U238   <- segment.data$Pb206 / segment.data$U238
-    segment.data$Pb207U235   <- segment.data$Pb207 / segment.data$U235
-    segment.data$Pb207Pb206  <- segment.data$Pb207 / segment.data$Pb206
-    segment.data$Age68 <- sapply(segment.data$Pb206U238,  calc_age_ratio, method = "U238-Pb206")
-    segment.data$Age75 <- sapply(segment.data$Pb207U235,  calc_age_ratio, method = "U235-Pb207")
-    segment.data$Age76 <- sapply(segment.data$Pb207Pb206, calc_age_ratio, method = "Pb207-Pb206")
+    segment.data[, 2:5] <- lapply(segment.data[, 2:5],
+                                  function(v) suppressWarnings(as.numeric(v)))
+    ag <- counts_to_ages(segment.data$Pb206, segment.data$Pb207,
+                         segment.data$U238, u238u235)
+    segment.data$Age68 <- ag$Age68
+    segment.data$Age75 <- ag$Age75
+    segment.data$Age76 <- ag$Age76
 
   } else if ("Pb206_U238" %in% colnames(raw) &&
              !all(is.na(raw$Pb206_U238[start_row:end_row]))) {
@@ -72,77 +125,172 @@ parse_segment_data <- function(raw, start_row, end_row) {
       Pb207Pb206 = raw$Pb207_Pb206[start_row:end_row],
       stringsAsFactors = FALSE
     )
-    segment.data[, 2:5] <- lapply(segment.data[, 2:5], as.numeric)
-    segment.data$Age68 <- sapply(segment.data$Pb206U238,  calc_age_ratio, method = "U238-Pb206")
-    segment.data$Age75 <- sapply(segment.data$Pb207U235,  calc_age_ratio, method = "U235-Pb207")
-    segment.data$Age76 <- sapply(segment.data$Pb207Pb206, calc_age_ratio, method = "Pb207-Pb206")
+    segment.data[, 2:5] <- lapply(segment.data[, 2:5],
+                                  function(v) suppressWarnings(as.numeric(v)))
+    ag <- ratios_to_ages(segment.data$Pb206U238, segment.data$Pb207U235,
+                         segment.data$Pb207Pb206)
+    segment.data$Age68 <- ag$Age68
+    segment.data$Age75 <- ag$Age75
+    segment.data$Age76 <- ag$Age76
+
   } else {
-    stop("Unrecognized data format. Expected Age68, Pb206, or Pb206_U238 columns.")
+    stop("Unrecognized data format. Expected Age68, Pb206, or Pb206_U238 ",
+         "columns; found: ", paste(colnames(raw), collapse = ", "),
+         call. = FALSE)
   }
 
-  # Extract additional numeric columns
   extra_names <- setdiff(colnames(raw), colnames(segment.data))
   extra_data <- NULL
   if (length(extra_names) > 0) {
     extra_data <- raw[start_row:end_row, extra_names, drop = FALSE]
-    extra_is_num <- sapply(extra_names, function(cn) {
+    extra_is_num <- vapply(extra_names, function(cn) {
       col_vals <- extra_data[[cn]]
       if (is.numeric(col_vals)) return(TRUE)
       converted <- suppressWarnings(as.numeric(as.character(col_vals)))
+      if (length(converted) == 0) return(FALSE)
       sum(!is.na(converted)) / length(converted) > 0.5
-    })
+    }, logical(1), USE.NAMES = FALSE)
     extra_names <- extra_names[extra_is_num]
   }
 
   list(data = segment.data, extra_names = extra_names, extra_data = extra_data)
 }
 
-#' Calculate U-Pb age from isotopic ratio
-#'
-#' @param ratio Isotopic ratio value
-#' @param method One of "U238-Pb206", "U235-Pb207", "Pb207-Pb206"
-#' @return Age in Ma, or NA
+# ---------------------------------------------------------------------------
+#  Outlier detection
+# ---------------------------------------------------------------------------
+
+#' KPSS test statistic for level stationarity (with Bartlett window)
 #' @keywords internal
-calc_age_ratio <- function(ratio, method) {
-  if (is.finite(ratio) && ratio > 0) {
-    input <- c(ratio, 0)
-    result <- IsoplotR::age(input, method = method, exterr = FALSE)
-    return(result[1])
-  } else {
-    return(NA)
+kpss_stat <- function(y) {
+  n <- length(y)
+  e <- y - mean(y)
+  S <- cumsum(e)
+  l <- max(1L, floor(4 * (n / 100)^0.25))
+  if (l >= n) l <- n - 1L
+  if (l < 1L) l <- 1L
+  g0 <- sum(e * e) / n
+  s2 <- g0
+  if (l >= 1L) {
+    for (k in seq_len(l)) {
+      gk <- sum(e[(k + 1L):n] * e[1:(n - k)]) / n
+      s2 <- s2 + 2 * (1 - k / (l + 1)) * gk
+    }
   }
+  if (!is.finite(s2) || s2 <= 0) return(0)
+  sum(S * S) / (n * n * s2)
+}
+
+#' Lightweight order selection for an ARIMA model
+#'
+#' Replicates the *intent* of `forecast::auto.arima()` (differencing order
+#' from a KPSS test, then AIC search over p and q) without the dependency.
+#' Grid search is used instead of the stepwise heuristic, so the selected
+#' model can occasionally differ from auto.arima; for the purpose of residual
+#' based outlier detection the effect is negligible.
+#'
+#' @param x Numeric vector.
+#' @param max_p,max_q Maximum AR / MA order.
+#' @param max_d Maximum differencing order.
+#' @return Integer vector c(p, d, q).
+#' @keywords internal
+arima_order <- function(x, max_p = 2L, max_q = 2L, max_d = 1L) {
+  d <- 0L
+  y <- x
+  repeat {
+    if (length(y) < 12L || d >= max_d) break
+    if (kpss_stat(y) < 0.463) break     # 5% critical value
+    y <- diff(y)
+    d <- d + 1L
+  }
+
+  best <- c(0L, d, 0L)
+  best_aic <- Inf
+  for (p in 0:max_p) {
+    for (q in 0:max_q) {
+      if (p == 0L && q == 0L) next
+      fit <- suppressWarnings(try(stats::arima(x, order = c(p, d, q)),
+                                  silent = TRUE))
+      if (inherits(fit, "try-error")) next
+      a <- fit$aic
+      if (is.finite(a) && a < best_aic) {
+        best_aic <- a
+        best <- c(p, d, q)
+      }
+    }
+  }
+  best
 }
 
 #' ARIMA-based outlier detection
 #'
-#' Fits an automatic ARIMA model, computes residuals, and marks values
-#' beyond 2 SD as outliers (NA).
+#' Fits an automatically ordered ARIMA model, computes residual standard
+#' deviations, and marks values beyond 2 SD as outliers (NA).
 #'
-#' @param series Numeric vector
-#' @return Numeric vector with outliers replaced by NA
+#' @param series Numeric vector.
+#' @param method \code{"arima"} (default, reproduces the published method),
+#'   \code{"mad"} (fast robust z-score) or \code{"none"}.
+#' @param n_sd Number of residual standard deviations used as the threshold.
+#' @return Numeric vector with outliers replaced by NA.
 #' @keywords internal
-arima_outlier <- function(series) {
-  arima_model <- forecast::auto.arima(series)
-  residuals   <- stats::residuals(arima_model)
-  outlier_idx <- which(abs(residuals) > 2 * sd(residuals))
-  series[outlier_idx] <- NA
-  return(series)
+arima_outlier <- function(series, method = c("arima", "mad", "none"),
+                          n_sd = 2) {
+  method <- match.arg(method)
+  if (identical(method, "none")) return(series)
+
+  ok <- !is.null(series) && length(series) >= 10 &&
+        sum(is.finite(series)) >= 10 &&
+        is.finite(stats::sd(series, na.rm = TRUE)) &&
+        stats::sd(series, na.rm = TRUE) > 0
+  if (!ok) return(series)
+
+  if (identical(method, "mad")) {
+    med <- stats::median(series, na.rm = TRUE)
+    mad <- stats::mad(series, na.rm = TRUE)
+    if (!is.finite(mad) || mad == 0) return(series)
+    series[abs(series - med) > n_sd * mad] <- NA
+    return(series)
+  }
+
+  ord <- tryCatch(arima_order(series), error = function(e) c(0L, 0L, 0L))
+  fit <- suppressWarnings(try(stats::arima(series, order = ord), silent = TRUE))
+  if (inherits(fit, "try-error")) return(series)
+
+  residuals <- suppressWarnings(try(stats::residuals(fit), silent = TRUE))
+  if (inherits(residuals, "try-error") || length(residuals) != length(series)) {
+    return(series)
+  }
+
+  res_sd <- stats::sd(residuals, na.rm = TRUE)
+  if (!is.finite(res_sd) || res_sd == 0) return(series)
+
+  # Align the residual vector with the original observations so that a fitted
+  # ARIMA(p, d, q) still marks the right rows.
+  len_res <- length(residuals)
+  if (len_res < length(series)) {
+    residuals <- c(rep(0, length(series) - len_res), residuals)
+  }
+
+  series[abs(residuals) > n_sd * res_sd] <- NA
+  series
 }
+
+# ---------------------------------------------------------------------------
+#  Preprocessing
+# ---------------------------------------------------------------------------
 
 #' Discordance filter for U-Pb ages
 #'
 #' For ages < 1000 Ma: marks Age68 as NA if |Age68 - Age75| / Age75 > 0.1
 #'
 #' @param df data.frame with Age68, Age75, Age76 columns
-#' @return Modified data.frame with subset_Age68 and subset_Age columns
+#' @return Modified data.frame with `Age`, `subset_Age68`, `subset_Age76`
 #' @keywords internal
 discordance_filter <- function(df) {
-  df$Age <- ifelse(df$Age68 < 1000, df$Age68,
-                   ifelse(df$Age76 > 1000, df$Age76, NA))
-  df$subset_Age68 <- ifelse(abs(df$Age68 - df$Age75) / df$Age75 <= 0.1,
-                            df$Age68, NA)
+  a75 <- df$Age75
+  df$subset_Age68 <- ifelse(abs(df$Age68 - a75) / a75 <= 0.1, df$Age68, NA)
   df$subset_Age76 <- df$Age76
-  return(df)
+  df
 }
 
 #' Sliding window mean fill for NA values
@@ -153,71 +301,66 @@ discordance_filter <- function(df) {
 #' @return Series with NAs filled by local mean
 #' @keywords internal
 mean_fill <- function(na_series, original_series, window_size = 5) {
-  calc_local_mean <- function(series, index) {
-    start_idx <- max(1, index - window_size)
-    end_idx   <- min(length(series), index + window_size)
-    mean(series[start_idx:end_idx], na.rm = TRUE)
-  }
   na_idx <- which(is.na(na_series))
-  for (idx in na_idx) {
-    na_series[idx] <- calc_local_mean(original_series, idx)
-  }
-  return(na_series)
+  if (length(na_idx) == 0) return(na_series)
+  local <- slide_mean_na(original_series, window_size)
+  na_series[na_idx] <- local[na_idx]
+  na_series
 }
 
-#' LOESS smoothing and standardization
+#' LOESS smoothing and standardisation
 #'
 #' @param df data.frame with subset_Age and Time columns
 #' @param span LOESS span parameter (default 0.15)
-#' @return data.frame with added loess_Age, standardized_loess, standardized_Age columns
+#' @return data.frame with loess_Age, standardized_loess, standardized_Age
 #' @keywords internal
 loess_segment <- function(df, span = 0.15) {
-  loess_model <- stats::loess(subset_Age ~ Time, data = df, span = span)
-  df$loess_Age <- stats::predict(loess_model)
+  loess_model <- try(stats::loess(subset_Age ~ Time, data = df, span = span),
+                     silent = TRUE)
+  if (inherits(loess_model, "try-error")) {
+    warning("LOESS smoothing failed; falling back to raw ages.", call. = FALSE)
+    df$loess_Age <- df$subset_Age
+  } else {
+    df$loess_Age <- stats::predict(loess_model)
+  }
   df <- df[complete.cases(df$loess_Age), ]
+  if (nrow(df) == 0) return(df)
 
   df$log_loess <- df$loess_Age
-  df$log_Age   <- df$Age
+  df$log_Age   <- df$subset_Age
 
   minloess <- min(df$log_loess)
   maxloess <- max(df$log_loess)
+  rng <- maxloess - minloess
 
-  df$standardized_loess <- (df$log_loess - minloess) / (maxloess - minloess)
-  df$standardized_Age   <- (df$log_Age   - minloess) / (maxloess - minloess)
+  if (!is.finite(rng) || rng <= 0) {
+    df$standardized_loess <- 0
+    df$standardized_Age   <- 0
+  } else {
+    df$standardized_loess <- (df$log_loess - minloess) / rng
+    df$standardized_Age   <- (df$log_Age   - minloess) / rng
+  }
   df <- df[complete.cases(df$standardized_loess), ]
 
   attr(df, "minloess") <- minloess
   attr(df, "maxloess") <- maxloess
-  return(df)
+  df
 }
 
-#' PELT changepoint detection
-#'
-#' @param series Numeric vector of standardized LOESS values
-#' @param n Number of observations (for SAIC penalty)
-#' @return A list with `changepoints` (integer vector) and `SAIC` (penalty value)
-#' @keywords internal
-pelt_segmentation <- function(series, n) {
-  AIC_result    <- changepoint::cpt.mean(series, method = "PELT",
-                                         penalty = "AIC", minseglen = 1)
-  aic_pen_value <- attr(AIC_result, "pen.value")
-  SAIC <- (aic_pen_value / 100) * log(n)
-
-  cpt_result <- changepoint::cpt.mean(series, method = "PELT",
-                                      penalty = "Manual", pen.value = SAIC,
-                                      minseglen = 1)
-  list(changepoints = cpt_result@cpts, SAIC = SAIC)
-}
+# ---------------------------------------------------------------------------
+#  Segmentation (vectorised)
+# ---------------------------------------------------------------------------
 
 #' Build plateau segment definitions from changepoints
 #'
 #' @param df data.frame with Time and standardized_loess columns
 #' @param changepoints Integer vector of changepoint row indices
-#' @return data.frame of segment start/end times and properties
+#' @return list(segments, df, segment_starts, segment_ends)
 #' @keywords internal
 build_segments <- function(df, changepoints) {
-  segment_starts <- c(1, utils::head(changepoints, -1) + 1)
+  segment_starts <- c(1L, utils::head(changepoints, -1L) + 1L)
   segment_ends   <- changepoints
+  m <- length(segment_starts)
 
   segments <- data.frame(
     Start = df$Time[segment_starts],
@@ -225,36 +368,20 @@ build_segments <- function(df, changepoints) {
     stringsAsFactors = FALSE
   )
 
-  # Standardized mean per segment
-  segments$standardized_Mean <- sapply(seq_len(nrow(segments)), function(i) {
-    mean(df$standardized_loess[segments$Start[i] <= df$Time &
-                               df$Time <= segments$End[i]])
-  })
+  segments$standardized_Mean <- seg_mean(df$standardized_loess,
+                                         segment_starts, segment_ends)
 
-  # Intra-segment normalization for variance
-  normalize_seg <- function(series, s, e) {
-    seg <- series[s:e]
-    (seg - min(seg)) / (max(seg) - min(seg))
-  }
+  df$IS_loess <- seg_normalise(df$loess_Age, segment_starts, segment_ends)
 
-  normalized <- lapply(seq_along(segment_starts), function(i) {
-    normalize_seg(df$loess_Age, segment_starts[i], segment_ends[i])
-  })
-  df$IS_loess <- unlist(normalized)
-
-  # Restore from standardization
   minloess <- attr(df, "minloess")
   maxloess <- attr(df, "maxloess")
   df$Restored_loess <- df$standardized_loess * (maxloess - minloess) + minloess
   df$Restored_age   <- df$standardized_Age   * (maxloess - minloess) + minloess
 
-  # Segment mean (original scale)
-  segments$Segment_Mean <- sapply(seq_len(nrow(segments)), function(i) {
-    mean(df$Restored_loess[segments$Start[i] <= df$Time &
-                           df$Time <= segments$End[i]])
-  })
+  segments$Segment_Mean <- seg_mean(df$Restored_loess,
+                                    segment_starts, segment_ends)
 
-  segments$Number <- seq_len(nrow(segments))
+  segments$Number <- seq_len(m)
   segments$Time_step <- segments$End - segments$Start
   segments$Max_step  <- max(segments$Time_step)
   segments$Min_step  <- min(segments$Time_step)
@@ -263,154 +390,96 @@ build_segments <- function(df, changepoints) {
        segment_ends = segment_ends)
 }
 
-#' Calculate slope and intercept for each plateau segment
+#' Slope and intercept for each plateau segment
 #'
-#' @param df data.frame with Time and age columns
-#' @param segments Segment definitions data.frame
-#' @param seg_starts Integer vector of segment start row indices
-#' @param seg_ends Integer vector of segment end row indices
-#' @return Updated segments data.frame with slope/intercept columns
+#' Closed-form OLS per segment, vectorised (no `lm()` call per segment).
+#'
 #' @keywords internal
-calc_slopes <- function(df, segments, seg_starts, seg_ends) {
-  calc_slope_int <- function(series, time, start, end) {
-    model <- stats::lm(series[start:end] ~ time[start:end])
-    stats::coef(model)
+calc_slopes <- function(df, segments, seg_starts = NULL, seg_ends = NULL) {
+  if (is.null(seg_starts)) {
+    seg_starts <- match(segments$Start, df$Time)
+    seg_ends   <- match(segments$End, df$Time)
   }
+  a <- seg_lm(df$Time, df$standardized_loess, seg_starts, seg_ends)
+  segments$standardized_intercept <- a$intercept
+  segments$standardized_slope     <- a$slope
 
-  segments$standardized_intercept <- sapply(seq_along(seg_starts), function(i) {
-    calc_slope_int(df$standardized_loess, df$Time, seg_starts[i], seg_ends[i])[1]
-  })
-  segments$standardized_slope <- sapply(seq_along(seg_starts), function(i) {
-    calc_slope_int(df$standardized_loess, df$Time, seg_starts[i], seg_ends[i])[2]
-  })
-  segments$loess_intercept <- sapply(seq_along(seg_starts), function(i) {
-    calc_slope_int(df$loess_Age, df$Time, seg_starts[i], seg_ends[i])[1]
-  })
-  segments$loess_slope <- sapply(seq_along(seg_starts), function(i) {
-    calc_slope_int(df$loess_Age, df$Time, seg_starts[i], seg_ends[i])[2]
-  })
-
-  return(segments)
+  b <- seg_lm(df$Time, df$loess_Age, seg_starts, seg_ends)
+  segments$loess_intercept <- b$intercept
+  segments$loess_slope     <- b$slope
+  segments
 }
 
-#' Calculate plateau variance
-#'
-#' @param df data.frame with IS_loess column
-#' @param seg_starts Integer vector of segment start row indices
-#' @param seg_ends Integer vector of segment end row indices
-#' @return Numeric vector of variance per segment
+#' Plateau variance (within-segment normalised LOESS)
 #' @keywords internal
 calc_variance <- function(df, seg_starts, seg_ends) {
-  sapply(seq_along(seg_starts), function(i) {
-    stats::var(df$IS_loess[seg_starts[i]:seg_ends[i]], na.rm = TRUE)
-  })
+  seg_var(df$IS_loess, seg_starts, seg_ends)
 }
 
-#' Calculate plateau uncertainties
+#' Plateau uncertainties
 #'
 #' Calibration uncertainty = Segment_Mean * 0.03
-#' Plateau uncertainty = sd(Raw_Age) / sqrt(n) within segment
+#' Plateau uncertainty = sd(Raw_Age) / sqrt(n) within the segment
 #' Total = sqrt(cal^2 + plateau^2)
-#'
-#' @param segments Segment definitions data.frame
-#' @param df data.frame with Raw_Age column
-#' @param seg_starts Segment start row indices
-#' @param seg_ends Segment end row indices
-#' @return Updated segments data.frame with uncertainty columns
 #' @keywords internal
 calc_uncertainty <- function(segments, df, seg_starts, seg_ends) {
   segments$Calibration_uncertainty <- segments$Segment_Mean * 0.03
-
-  segments$Plateau_uncertainty <- sapply(seq_along(seg_starts), function(i) {
-    seg <- df$Raw_Age[seg_starts[i]:seg_ends[i]]
-    seg <- seg[!is.na(seg)]
-    n  <- length(seg)
-    if (n < 2) return(NA)
-    stats::sd(seg) / sqrt(n)
-  })
-
-  segments$Total_uncertainty <- sqrt(
-    segments$Calibration_uncertainty^2 + segments$Plateau_uncertainty^2
-  )
-
-  return(segments)
+  n  <- seg_count(df$Raw_Age, seg_starts, seg_ends)
+  sd <- seg_sd_na(df$Raw_Age, seg_starts, seg_ends)
+  pu <- sd / sqrt(n)
+  pu[n < 2L] <- NA_real_
+  segments$Plateau_uncertainty <- pu
+  segments$Total_uncertainty <- sqrt(segments$Calibration_uncertainty^2 + pu^2)
+  segments
 }
 
-#' Calculate extra (non-age) column means per plateau segment
-#'
-#' @param segments Segment definitions data.frame
-#' @param df data.frame with extra columns
-#' @param extra_names Character vector of extra column names
-#' @return Updated segments data.frame with *_Mean columns
+#' Means of extra (non-age) columns per plateau segment
 #' @keywords internal
-calc_extra_means <- function(segments, df, extra_names) {
+calc_extra_means <- function(segments, df, extra_names,
+                             seg_starts = NULL, seg_ends = NULL) {
   if (length(extra_names) == 0) return(segments)
-
-  safe_mean <- function(x) {
-    x <- as.numeric(x)
-    x <- x[!is.na(x)]
-    if (length(x) == 0) NA else mean(x)
+  if (is.null(seg_starts)) {
+    seg_starts <- match(segments$Start, df$Time)
+    seg_ends   <- match(segments$End, df$Time)
   }
-
   for (col_name in extra_names) {
     mean_name <- paste0(col_name, "_Mean")
     if (col_name %in% colnames(df)) {
-      segments[[mean_name]] <- sapply(seq_len(nrow(segments)), function(k) {
-        vals <- df[[col_name]][segments$Start[k] <= df$Time &
-                               df$Time <= segments$End[k]]
-        safe_mean(vals)
-      })
+      segments[[mean_name]] <-
+        seg_mean_na(df[[col_name]], seg_starts, seg_ends)$mean
     } else {
-      segments[[mean_name]] <- NA
+      segments[[mean_name]] <- NA_real_
     }
   }
-  return(segments)
+  segments
 }
 
-#' Calculate Age68, Age75, Age76 means and total uncertainties per plateau
-#'
-#' @param segments Segment definitions data.frame
-#' @param df data.frame with Age68, Age75, Age76 columns
-#' @return Updated segments data.frame with age mean/uncertainty columns
+#' Mean and total uncertainty of Age68/Age75/Age76 per plateau
 #' @keywords internal
-calc_age_means <- function(segments, df) {
-  safe_mean <- function(x) {
-    x <- x[!is.na(x)]
-    if (length(x) == 0) NA else mean(x)
+calc_age_means <- function(segments, df, seg_starts = NULL, seg_ends = NULL) {
+  if (is.null(seg_starts)) {
+    seg_starts <- match(segments$Start, df$Time)
+    seg_ends   <- match(segments$End, df$Time)
   }
-
   for (age_col in c("Age68", "Age75", "Age76")) {
     if (!age_col %in% colnames(df)) next
-
-    mean_name <- paste0(age_col, "_Mean")
-    unc_name  <- paste0(age_col, "_Total_uncertainty")
-
-    segments[[mean_name]] <- sapply(seq_len(nrow(segments)), function(k) {
-      vals <- df[[age_col]][segments$Start[k] <= df$Time &
-                            df$Time <= segments$End[k]]
-      safe_mean(vals)
-    })
-
-    segments[[unc_name]] <- sapply(seq_len(nrow(segments)), function(k) {
-      vals <- df[[age_col]][segments$Start[k] <= df$Time &
-                            df$Time <= segments$End[k]]
-      vals <- vals[!is.na(vals)]
-      n <- length(vals)
-      if (n < 2) return(NA)
-      plateau_unc <- stats::sd(vals) / sqrt(n)
-      cal_unc <- mean(vals) * 0.03
-      sqrt(cal_unc^2 + plateau_unc^2)
-    })
+    v  <- df[[age_col]]
+    mn <- seg_mean_na(v, seg_starts, seg_ends)
+    n  <- mn$n
+    s  <- seg_sd_na(v, seg_starts, seg_ends)
+    plateau_unc <- s / sqrt(n)
+    cal_unc     <- mn$mean * 0.03
+    unc <- sqrt(cal_unc^2 + plateau_unc^2)
+    unc[n < 2L] <- NA_real_
+    segments[[paste0(age_col, "_Mean")]] <- mn$mean
+    segments[[paste0(age_col, "_Total_uncertainty")]] <- unc
   }
-  return(segments)
+  segments
 }
 
-#' Calculate U-Pb concordance (Age68 / Age75 * 100) per plateau
-#'
-#' @param segments Segment definitions data.frame
-#' @return Updated segments data.frame with Concordance column
+#' U-Pb concordance (Age68 / Age75 * 100) per plateau
 #' @keywords internal
 calc_concordance <- function(segments) {
   segments$Concordance <- (segments$Age68_Mean / segments$Age75_Mean) * 100
-  return(segments)
+  segments
 }

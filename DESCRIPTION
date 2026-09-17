@@ -1,7 +1,8 @@
 Package: ADEPT
 Type: Package
 Title: Automated Depth Profiling Technique for U-Pb Geochronology
-Version: 1.0.1
+Version: 1.1.0
+Date: 2026-09-17
 Authors@R: c(
     person("Yao", "Wang", role = c("aut", "cre"), email = "yaowang_cugb@163.com"),
     person("Ze", "Liu", role = "aut"),
@@ -16,28 +17,29 @@ Authors@R: c(
 Description: An automated method to quantitatively identify and extract age plateaus
     from LA-ICP-MS depth profiling data of zircon U-Pb geochronology. The package
     implements ARIMA-based outlier detection, LOESS smoothing, PELT changepoint
-    segmentation, multi-step plateau filtering (forward/reverse), Bayesian MCMC
-    posterior analysis, and publication-ready visualization. Supports three input
-    formats: direct U-Pb ages (Age68/Age75/Age76), raw isotope counts
+    segmentation, multi-step plateau filtering (forward/reverse), optional Bayesian
+    MCMC posterior analysis, and publication-ready visualization. Supports three
+    input formats: direct U-Pb ages (Age68/Age75/Age76), raw isotope counts
     (Pb206/Pb207/U238), or isotopic ratios (Pb206_U238/Pb207_U235/Pb207_Pb206).
+    All core functionality runs on base R alone - OOXML reading/writing, U-Pb age
+    conversion, PELT segmentation, ARIMA order selection and plotting are
+    implemented inside the package, so results do not depend on the changing
+    behaviour of third-party packages.
     Method described in Wang et al. (2026), JGR: Solid Earth, 131, e2025JB033324.
 License: MIT + file LICENSE
 Encoding: UTF-8
 RoxygenNote: 7.3.0
+Depends:
+    R (>= 3.5.0)
 Imports:
     stats,
-    ggplot2,
-    zoo,
-    changepoint,
-    readxl,
-    forecast,
-    openxlsx,
-    writexl,
-    dplyr,
-    MASS,
-    gridExtra
+    utils,
+    graphics,
+    grDevices
 Suggests:
+    writexl,
     mcp,
-    IsoplotR
+    shiny,
+    DT
 URL: https://github.com/yaowang-space/ADEPT
 BugReports: https://github.com/yaowang-space/ADEPT/issues

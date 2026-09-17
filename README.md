@@ -33,10 +33,41 @@ remotes::install_local("path/to/ADEPT")
 
 ### Dependencies
 
-The package requires:
+**ADEPT has no hard external dependencies.** Every part of the pipeline runs on
+base R:
 
-- **Required:** `stats`, `ggplot2`, `zoo`, `changepoint`, `readxl`, `forecast`, `openxlsx`, `writexl`, `dplyr`, `MASS`, `gridExtra`
-- **Optional:** `IsoplotR` (for isotope ratio → age conversion), `mcp` (for Bayesian MCMC)
+| Original dependency | Now handled by |
+|---|---|
+| `ggplot2` | base `graphics` / `grDevices` |
+| `changepoint` | built-in PELT (`R/pelt.R`) |
+| `forecast` | `stats::arima()` + KPSS/AIC order search |
+| `IsoplotR` | built-in U-Pb decay equations (`R/isotopes.R`) |
+| `readxl`, `openxlsx` | built-in OOXML reader (`R/xlsx.R`) |
+| `writexl` | built-in OOXML writer, *or* `writexl` if installed |
+| `zoo`, `dplyr`, `MASS`, `gridExtra` | never used — removed |
+
+Optional packages, all in `Suggests`:
+
+- `writexl` — 10-100x faster Excel writing (the built-in writer is used when it
+  is absent; force it with `options(ADEPT.xlsx_engine = "internal")`)
+- `mcp` + JAGS — Bayesian MCMC posterior analysis
+- `shiny` (+ `DT`) — graphical interface
+
+## Graphical interface
+
+No R coding needed — launch the Shiny workbench:
+
+```r
+library(ADEPT)
+adept_gui()
+```
+
+It lets you upload an `.xlsx` file, adjust every parameter, page through the
+depth profiles, and download the Excel workbook or a combined PDF of all
+profiles. The app source lives in
+[`inst/shiny/app.R`](inst/shiny/app.R) — edit it directly, no reinstall
+required. See [`inst/shiny/README_gui.md`](inst/shiny/README_gui.md) for a
+walkthrough.
 
 ## Quick Start
 
@@ -78,12 +109,21 @@ adept(
   min_plateau_resolution = NULL,   # NULL = auto (>= 5 s)
   variance_threshold     = 0.1192,
   filter_direction       = "Forward",  # "Forward" or "Reverse"
-  mcmc                   = TRUE,       # Bayesian MCMC?
-  plot                   = TRUE,       # Generate PDF plots?
-  output_path            = NULL,       # NULL = auto-named
-  plot_dir               = NULL        # NULL = same as input
+  outlier_method         = "arima",    # "arima" | "mad" | "none"
+  outlier_sd             = 2,          # residual SD threshold
+  u238u235               = 137.818,    # for count-based input
+  mcmc                   = FALSE,      # Bayesian MCMC?
+  make_plots             = TRUE,       # Build depth profile plots?
+  save_plots_to_disk     = TRUE,       # Write PDFs to plot_dir?
+  output_path            = NULL,       # NULL = auto-named; NA = do not write
+  plot_dir               = NULL,       # NULL = same as input
+  keep_profiles          = FALSE,      # Return per-zircon data for re-plotting
+  progress               = NULL,       # Callback fn(fraction, detail)
+  verbose                = TRUE
 )
 ```
+
+> `plot` is still accepted as a deprecated alias for `make_plots`.
 
 ## Parameter Details
 
@@ -98,10 +138,17 @@ adept(
 | `min_plateau_resolution` | numeric / NULL | NULL | Min plateau duration (s). NULL defaults to 5 |
 | `variance_threshold` | numeric | 0.1192 | Maximum plateau variance |
 | `filter_direction` | character | "Forward" | "Forward" = keep ascending; "Reverse" = keep descending |
-| `mcmc` | logical | TRUE | Run MCMC posterior analysis? |
-| `plot` | logical | TRUE | Save depth profile PDFs? |
-| `output_path` | character / NULL | NULL | Output Excel path. NULL = auto |
-| `plot_dir` | character / NULL | NULL | Plot PDF directory. NULL = input dir |
+| `outlier_method` | character | "arima" | "arima" (published method), "mad" (fast), "none" |
+| `outlier_sd` | numeric | 2 | Threshold in residual SDs |
+| `u238u235` | numeric | 137.818 | 238U/235U for count-based input |
+| `mcmc` | logical | `FALSE` | Run MCMC posterior analysis? |
+| `make_plots` | logical | `TRUE` | Build depth profile plots? |
+| `save_plots_to_disk` | logical | `TRUE` | Write plot PDFs to `plot_dir`? |
+| `output_path` | character / NULL / NA | `NULL` | Output Excel path. `NULL` = auto, `NA` = do not write |
+| `plot_dir` | character / NULL | `NULL` | Plot PDF directory. `NULL` = directory of the input file |
+| `keep_profiles` | logical | `FALSE` | Return per-zircon series + plateau tables as `$profiles` |
+| `progress` | function / NULL | `NULL` | `function(fraction, detail)` progress callback |
+| `verbose` | logical | `TRUE` | Print per-zircon messages? |
 
 ## Input Data Format
 
@@ -146,15 +193,19 @@ detected and their plateau means will be included in the output.
 **Sheet 2 — Full Results:** All plateaus with complete statistics including
 MCMC posterior estimates (if `mcmc = TRUE`), slope/intercept, and filter flags.
 
-### Return Value
-
 ```r
 list(
-  summary = data.frame,   # Sheet 1 content
-  full    = data.frame,   # Sheet 2 content
-  plots   = list()        # ggplot objects (if plot = TRUE)
+  summary  = data.frame,   # Sheet 1 content
+  full     = data.frame,   # Sheet 2 content
+  plots    = list(),       # ggplot objects (if make_plots = TRUE)
+  profiles = list()        # per-zircon data + segments (if keep_profiles = TRUE)
 )
 ```
+
+All numeric columns are returned as `numeric` (and written to Excel as
+numbers, not text).
+
+### Return Value
 
 ## Processing Pipeline
 
@@ -163,6 +214,57 @@ Input Excel → Format Detection → ARIMA Outliers → Discordance Filter
 → Mean Fill → LOESS Smoothing → Standardization → PELT Segmentation
 → Plateau Statistics → 4-Step Filtering → [MCMC] → Output
 ```
+
+## Changelog
+
+### 1.1.0
+
+**Dependency removal.** The package now runs on base R alone. `ggplot2`,
+`changepoint`, `forecast`, `IsoplotR`, `readxl` and `openxlsx` are gone;
+`writexl` became optional. This insulates the results from upstream changes —
+verified against the previous implementation, segment boundaries and ages are
+identical (differences ≤ 4e-12, i.e. floating-point noise).
+
+- Built-in **OOXML reader/writer** (`R/xlsx.R`). Reading is validated against
+  `readxl` on the bundled example (identical column names and values, max
+  difference 0) and is ~1.7x slower than `readxl`; writing produces files that
+  Excel, LibreOffice and `readxl` all read back correctly.
+- Built-in **PELT** changepoint detection (`R/pelt.R`), L2 cost. Reproduces
+  `changepoint::cpt.mean(penalty = "Manual", minseglen = 1)` changepoint sets
+  **exactly** on all tested series. The AIC penalty (always 4 for a univariate
+  mean model) is now a package constant instead of a package lookup.
+- Built-in **U-Pb age conversion** (`R/isotopes.R`), matching `IsoplotR` to
+  < 1e-4 Ma over the whole geological range.
+- Built-in **ARIMA order selection** (`stats::arima()` + KPSS + AIC grid),
+  replacing `forecast::auto.arima()`. New argument `outlier_method =
+  c("arima", "mad", "none")`.
+- **Vectorised segment statistics** (`R/segstats.R`): prefix sums instead of
+  `sapply` + `lm()` per segment. Segment means 71x faster, segment regression
+  ~2000x faster, and the whole pipeline ~2x faster end-to-end on a 40-zircon
+  workbook — while dropping a C dependency.
+- **Base-graphics plotting**: `plot_depth_profile()` now returns an
+  `adept_profile` record drawn by `draw_profile()`.
+
+### 1.0.2
+
+- **Fix:** numeric results were written to Excel as *text*. `adept()` built
+  each row with `c()`, which coerces numbers to character. Rows are now named
+  lists, so every numeric column keeps its type.
+- **Fix:** `mcmc = TRUE` without the `mcp` package crashed with
+  `length of 'dimnames' [2] not equal to array extent`. MCMC columns are now
+  always present (filled with `NA` when unavailable).
+- **Fix:** `mcp_step` logic (`sum(!is.na(mcp_step)) >= 3` was a tautology) and
+  the single-plateau case, which errored on a zero-length replacement.
+- **Fix:** renamed `Final Serial Number` → `Final serial number` so the column
+  name no longer changes with `mcmc`.
+- **Fix:** `tools::file_path_sans_ext` used without declaring `tools` in
+  `Imports`; `IsoplotR` is now checked with an actionable error message.
+- **Robustness:** `auto.arima`, LOESS and PELT are wrapped in guards, so a
+  single bad zircon no longer aborts the whole run — it emits an empty row.
+- **Removed** unused dependencies `dplyr`, `MASS`, `gridExtra`, `zoo`.
+- **Added** `man/` documentation, a Shiny GUI (`adept_gui()`), the
+  `keep_profiles` and `progress` arguments, and `make_plots` /
+  `save_plots_to_disk` (replacing the ambiguous `plot`).
 
 ## Citation
 
