@@ -138,9 +138,15 @@ adept(
 | `min_plateau_resolution` | numeric / NULL | NULL | Min plateau duration (s). NULL defaults to 5 |
 | `variance_threshold` | numeric | 0.1192 | Maximum plateau variance |
 | `filter_direction` | character | "Forward" | "Forward" = keep ascending; "Reverse" = keep descending |
+| `direction_method` | character | "monotonic" | "monotonic" = longest monotonic subsequence (tolerates noise); "strict" = v1.1.0 behaviour |
+| `direction_tolerance` | numeric | 0.02 | Relative reversal tolerated by `direction_method = "monotonic"` |
 | `outlier_method` | character | "arima" | "arima" (published method), "mad" (fast), "none" |
 | `outlier_sd` | numeric | 2 | Threshold in residual SDs |
+| `preprocess` | character | "arima_loess" | "arima_loess" (published pipeline) or "robust_loess" |
+| `smooth` | character | "loess" | `"none"` skips smoothing entirely - use it when the input is already corrected for down-hole fractionation |
+| `calibration_uncertainty` | numeric | 0.03 | Relative 1-sigma reproducibility of the primary reference material |
 | `u238u235` | numeric | 137.818 | 238U/235U for count-based input |
+| `validate_input` | logical | `TRUE` | Run the input sanity checks and report actionable problems? |
 | `mcmc` | logical | `FALSE` | Run MCMC posterior analysis? |
 | `make_plots` | logical | `TRUE` | Build depth profile plots? |
 | `save_plots_to_disk` | logical | `TRUE` | Write plot PDFs to `plot_dir`? |
@@ -243,6 +249,21 @@ to notice:
 Windows, for the current and the previous R release.
 
 ## Changelog
+
+### Unreleased
+
+**`smooth = "none"`** (new). Skips the smoothing step entirely and segments the
+profile as measured. Use it when the input has already been corrected for
+down-hole fractionation - an F(tau) correction applied by an external
+reduction, say. Such a profile is flat inside a domain, so fitting LOESS to it
+again would round off the real domain boundaries. The outlier screen selected
+by `preprocess` still runs, and the profile is still scaled before PELT; only
+the smoothing is skipped. The default stays `"loess"`, so existing results are
+unchanged - the bundled example still gives 21.61724 / 22.56383 / 23.60464 Ma.
+
+Also fills in five parameters that v1.2.0 introduced but the parameter table
+below never listed: `preprocess`, `calibration_uncertainty`,
+`direction_method`, `direction_tolerance` and `validate_input`.
 
 ### 1.2.0
 

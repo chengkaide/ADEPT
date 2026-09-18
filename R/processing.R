@@ -401,18 +401,33 @@ mean_fill <- function(na_series, original_series, window_size = 5) {
 #' @param family "gaussian" (ordinary least squares, the published pipeline) or
 #'   "symmetric" (robust M-estimation, which downweights outliers). Using
 #'   "symmetric" lets the ARIMA outlier screen be skipped entirely.
+#' @param smooth "loess" to smooth the profile; "none" to use the ages as they
+#'   are. "none" is for data that already carry a down-hole fractionation
+#'   correction: such a profile is flat within a domain, and smoothing would
+#'   round off the real domain boundaries. Standardisation is applied either
+#'   way, because PELT needs a comparable scale.
 #' @return data.frame with loess_Age, standardized_loess, standardized_Age
 #' @keywords internal
-loess_segment <- function(df, span = 0.15, family = c("gaussian", "symmetric")) {
+loess_segment <- function(df, span = 0.15,
+                          family = c("gaussian", "symmetric"),
+                          smooth = c("loess", "none")) {
   family <- match.arg(family)
-  loess_model <- try(
-    stats::loess(subset_Age ~ Time, data = df, span = span, family = family),
-    silent = TRUE)
-  if (inherits(loess_model, "try-error")) {
-    warning("LOESS smoothing failed; falling back to raw ages.", call. = FALSE)
+  smooth <- match.arg(smooth)
+
+  if (identical(smooth, "none")) {
+    # Without smoothing, log_loess below equals log_Age, so standardized_loess
+    # and standardized_Age coincide and PELT segments the profile as measured.
     df$loess_Age <- df$subset_Age
   } else {
-    df$loess_Age <- stats::predict(loess_model)
+    loess_model <- try(
+      stats::loess(subset_Age ~ Time, data = df, span = span, family = family),
+      silent = TRUE)
+    if (inherits(loess_model, "try-error")) {
+      warning("LOESS smoothing failed; falling back to raw ages.", call. = FALSE)
+      df$loess_Age <- df$subset_Age
+    } else {
+      df$loess_Age <- stats::predict(loess_model)
+    }
   }
   df <- df[complete.cases(df$loess_Age), ]
   if (nrow(df) == 0) return(df)

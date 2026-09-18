@@ -179,6 +179,26 @@ data.frame(preprocess = c("arima_loess", "robust_loess"),
 Run both and report the comparison. If the geological conclusion changes
 between them, the conclusion was never robust.
 
+There is a third option, `smooth = "none"`, which turns smoothing off
+altogether and segments the profile as measured. It exists for data that have
+already been corrected for down-hole fractionation before they reach ADEPT -
+say an F(tau) correction applied by an external reduction. Such a profile is
+already flat inside a domain, and fitting LOESS to it a second time would
+round off the real domain boundaries.
+
+```{r}
+ns <- adept(input, smooth = "none", output_path = NA, make_plots = FALSE,
+            verbose = FALSE)
+data.frame(setting = c("smooth = \"loess\" (default)", "smooth = \"none\""),
+           plateaus = c(nrow(result$summary), nrow(ns$summary)),
+           first_age = c(result$summary[["Final age (Ma)"]][1],
+                         ns$summary[["Final age (Ma)"]][1]))
+```
+
+The ages move by a small amount rather than changing the answer. What changes
+is that the segmentation follows the profile you gave it, instead of a
+smoothed version of it. On uncorrected data, leave the default.
+
 ## Bayesian posterior (optional)
 
 `mcmc = TRUE` adds a piecewise-linear changepoint posterior via the `mcp`

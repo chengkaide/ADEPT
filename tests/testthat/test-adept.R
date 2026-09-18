@@ -97,6 +97,30 @@ test_that("robust_loess runs and stays geologically plausible", {
               info = paste(ages, collapse = ", "))
 })
 
+test_that("smooth = none segments the profile as measured", {
+  # The switch is for data that already carry a down-hole fractionation
+  # correction: such a profile is flat inside a domain, so smoothing it again
+  # would round off the real domain boundaries. With smoothing off the fitted
+  # series IS the measured series, and the two standardised scales coincide.
+  sm <- run_example(keep_profiles = TRUE)
+  ns <- run_example(keep_profiles = TRUE, smooth = "none")
+  a <- sm$profiles[[1]]$data
+  b <- ns$profiles[[1]]$data
+
+  expect_equal(b$loess_Age, b$subset_Age)
+  expect_equal(b$standardized_loess, b$standardized_Age)
+  expect_gt(max(abs(a$loess_Age - a$subset_Age)), 0.5)      # default does smooth
+  expect_gt(max(abs(a$standardized_loess - a$standardized_Age)), 0.1)
+
+  # the plateau ages move, but only a little: this refines the segmentation
+  # rather than producing a different answer
+  expect_equal(nrow(ns$summary), nrow(sm$summary))
+  expect_false(isTRUE(all.equal(ns$summary[["Final age (Ma)"]],
+                                sm$summary[["Final age (Ma)"]])))
+  expect_true(all(abs(ns$summary[["Final age (Ma)"]] -
+                        sm$summary[["Final age (Ma)"]]) < 0.1))
+})
+
 test_that("the output workbook is written and read back", {
   f <- tempfile(fileext = ".xlsx")
   on.exit(unlink(f), add = TRUE)

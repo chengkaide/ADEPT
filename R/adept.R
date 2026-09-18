@@ -245,6 +245,7 @@ adept <- function(
     outlier_method            = c("arima", "mad", "none"),
     outlier_sd                = 2,
     preprocess                = c("arima_loess", "robust_loess"),
+    smooth                    = c("loess", "none"),
     calibration_uncertainty   = 0.03,
     u238u235                  = ADEPT_U238U235,
     validate_input            = TRUE,
@@ -262,6 +263,7 @@ adept <- function(
   direction_method  <- match.arg(direction_method)
   outlier_method    <- match.arg(outlier_method)
   preprocess        <- match.arg(preprocess)
+  smooth            <- match.arg(smooth)
 
   if (!is.numeric(calibration_uncertainty) ||
       length(calibration_uncertainty) != 1L ||
@@ -484,14 +486,19 @@ adept <- function(
         extra_names <- character(0)
       }
 
-      # ---- LOESS ------------------------------------------------------------
+      # ---- Smoothing --------------------------------------------------------
+      # smooth = "none" keeps the ages as measured. Use it when the input has
+      # already been corrected for down-hole fractionation (e.g. an F(tau)
+      # correction in an external reduction): the profile is then flat inside
+      # a domain, and LOESS would round off the real domain boundaries.
       subset_data <- loess_segment(
         subset_data, span = 0.15,
-        family = if (identical(preprocess, "robust_loess")) "symmetric" else "gaussian"
+        family = if (identical(preprocess, "robust_loess")) "symmetric" else "gaussian",
+        smooth = smooth
       )
       if (nrow(subset_data) == 0 ||
           sum(!is.na(subset_data$standardized_loess)) < 10) {
-        finish(nrow(subset_data), "LOESS failed")
+        finish(nrow(subset_data), "smoothing failed")
         next
       }
 

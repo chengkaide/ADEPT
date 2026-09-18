@@ -17,6 +17,7 @@ adept(
   outlier_method = c("arima", "mad", "none"),
   outlier_sd = 2,
   preprocess = c("arima_loess", "robust_loess"),
+  smooth = c("loess", "none"),
   calibration_uncertainty = 0.03,
   u238u235 = ADEPT_U238U235,
   validate_input = TRUE,
@@ -77,6 +78,15 @@ ARIMA residual screening followed by an ordinary LOESS fit) or
 \code{"robust_loess"}, which skips the ARIMA screen entirely and fits
 \code{loess(family = "symmetric")} so that outliers are downweighted rather
 than deleted.}
+
+\item{smooth}{\code{"loess"} (default) smooths the age profile before
+segmentation. \code{"none"} keeps the ages as measured, and is the right
+choice when the input has already been corrected for down-hole
+fractionation (for example an F(tau) correction applied by an external
+reduction such as \pkg{upb}): such a profile is flat inside a domain, so
+smoothing it again would round off the real domain boundaries. Only the
+smoothing is skipped - the outlier screen selected by \code{preprocess}
+still runs, and the profile is still scaled before PELT.}
 
 \item{calibration_uncertainty}{Relative 1-sigma reproducibility of the primary
 reference material (default 0.03, i.e. 3 \%). It dominated the reported total
