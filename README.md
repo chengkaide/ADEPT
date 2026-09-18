@@ -18,11 +18,11 @@ remotes::install_github("yaowang-space/ADEPT")
 
 ### From tarball (no internet required after download)
 
-1. Download `ADEPT_1.0.1.tar.gz` from [GitHub Releases](https://github.com/yaowang-space/ADEPT/releases)
+1. Download `ADEPT_1.3.0.tar.gz` from [GitHub Releases](https://github.com/yaowang-space/ADEPT/releases)
 2. Install locally:
 
 ```r
-install.packages("ADEPT_1.0.1.tar.gz", repos = NULL, type = "source")
+install.packages("ADEPT_1.3.0.tar.gz", repos = NULL, type = "source")
 ```
 
 ### From local source
@@ -314,20 +314,12 @@ Windows, for the current and the previous R release.
 
 ## Changelog
 
-### Unreleased
+### 1.3.0
 
-**`smooth = "none"`** (new). Skips the smoothing step entirely and segments the
-profile as measured. Use it when the input has already been corrected for
-down-hole fractionation - an F(tau) correction applied by an external
-reduction, say. Such a profile is flat inside a domain, so fitting LOESS to it
-again would round off the real domain boundaries. The outlier screen selected
-by `preprocess` still runs, and the profile is still scaled before PELT; only
-the smoothing is skipped. The default stays `"loess"`, so existing results are
-unchanged - the bundled example still gives 21.61724 / 22.56383 / 23.60464 Ma.
-
-Also fills in five parameters that v1.2.0 introduced but the parameter table
-below never listed: `preprocess`, `calibration_uncertainty`,
-`direction_method`, `direction_tolerance` and `validate_input`.
+Focused on one thing: making ADEPT usable when the depth profile has already
+been reduced elsewhere. Everything added here is opt-in, and every published
+number is reproduced exactly - the bundled example still gives
+21.61724 / 22.56383 / 23.60464 Ma.
 
 **Per-point uncertainties, and MSWD** (new, Format 4). Supplying `Age68_1s`
 (or `Age75_1s` / `Age76_1s`) alongside the ages switches the plateau age to an
@@ -342,8 +334,69 @@ precision but says nothing about whether the points agree with one another -
 a plateau built from two discordant populations could look precise. MSWD is
 the test for that, and it needs per-point errors to exist.
 
+Note the suffix convention: `_1s` is **1-sigma, not 2-sigma**. Passing 2-sigma
+shrinks MSWD by a factor of four.
+
 Without sigma columns nothing changes: the three new columns are present and
-`NA`, and every published number is reproduced exactly.
+`NA`.
+
+**`smooth = "none"`** (new). Skips the smoothing step entirely and segments the
+profile as measured. Use it when the input has already been corrected for
+down-hole fractionation - an F(tau) correction applied by an external
+reduction, say. Such a profile is flat inside a domain, so fitting LOESS to it
+again would round off the real domain boundaries. The outlier screen selected
+by `preprocess` still runs, and the profile is still scaled before PELT; only
+the smoothing is skipped.
+
+**One sheet may now stack several zircons.** Rows are grouped by consecutive
+`Analysis` value instead of by `chunk_size`. Previously a sheet holding 48
+zircons was cut every `chunk_size` rows, which both merged different zircons
+into one block and could split one zircon across two - while the output columns
+had always assumed one analysis per block. `chunk_size` is now only the
+fallback for input with no `Analysis` column at all, and the monotonicity check
+runs within each zircon rather than across the whole sheet (a stacked sheet
+restarts `Time` at every analysis, which is correct, not an error).
+
+**Inputs without 207Pb ages are accepted.** A plateaux-level input from an
+external reduction often carries only 206Pb/238U, because at window level
+207Pb counts are too few to be worth carrying. `Age75` and `Age76` are now
+optional throughout; the columns that depend on them come back `NA` rather
+than failing.
+
+**Two consistency defects fixed**, both found while wiring the above together:
+
+* `calc_age_means()` hard-coded 0.03 for the per-ratio uncertainties while
+  `calc_uncertainty()` took the `calibration_uncertainty` argument. At
+  `calibration_uncertainty = 0` - the setting an externally reduced input
+  needs - the exported workbook quoted 3 % on some columns and 0 % on others.
+  With the default 0.03 nothing moves.
+* `calc_variance()` returned a missing value when a segment was exactly flat,
+  so `Filter_2` evaluated to `NA` and the plateau was discarded. A flat segment
+  is the best possible plateau. This only fires under `smooth = "none"` on a
+  profile that really is flat - precisely the input the MSWD columns exist for.
+
+**`adept()` was split up.** Its per-zircon loop body was 290 lines that
+interleaved progress bookkeeping with parsing, windowing, fitting and
+filtering, which is how the same check came to be written twice in two places
+with two different behaviours. The per-zircon work now lives in `R/zircon.R`
+as four named steps (`adept_zircon_groups()`, `adept_one_zircon()`,
+`adept_prepare_window()`, `adept_fit_plateaus()`), each a pure function of
+`(data, cfg)` that reports failure as `ok = FALSE` plus a short label. A second
+"no ages" guard that had become unreachable after the change above was deleted
+rather than left to drift from its twin.
+
+Also fills in five parameters that v1.2.0 introduced but the parameter table
+below never listed: `preprocess`, `calibration_uncertainty`,
+`direction_method`, `direction_tolerance` and `validate_input`.
+
+**Works with the DRUID reduction.** The `windows` table that DRUID writes -
+window-level `Age68` / `Age68_1s` - is named to match Format 4, so it can be
+passed to `adept()` without renaming anything. Because such a profile has
+already been corrected for down-hole fractionation, call it with
+`smooth = "none"` and `calibration_uncertainty = 0` (DRUID's sigmas already
+include the external reproducibility; multiplying by 3 % again would count it
+twice). Both are explicit on purpose: a per-point sigma column says nothing
+about where the ablation window ends, so ADEPT does not guess.
 
 ### 1.2.0
 
