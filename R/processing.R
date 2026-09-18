@@ -11,6 +11,62 @@
 #  Input
 # ---------------------------------------------------------------------------
 
+#' Normalise column names read from a spreadsheet
+#'
+#' Header cells are written by hand in the lab, so "Pb206/U238", "Pb206 U238"
+#' and "Pb206_U238" all occur in real files. Everything downstream expects the
+#' underscore form.
+#'
+#' @param raw A data.frame straight from the reader.
+#' @return The same data.frame with spaces and slashes replaced by underscores.
+#' @keywords internal
+adept_normalise_colnames <- function(raw) {
+  colnames(raw) <- gsub(" |/", "_", colnames(raw))
+  raw
+}
+
+#' Does a column hold numbers (or something that is mostly numbers)?
+#'
+#' Shared by the pre-scan and by the extra-column extraction, which used to
+#' carry two copies of the same test.
+#'
+#' @param v A column vector.
+#' @param min_frac Minimum fraction of non-NA values after coercion.
+#' @return Logical scalar.
+#' @keywords internal
+is_numeric_column <- function(v, min_frac = 0.5) {
+  if (is.numeric(v)) return(TRUE)
+  cv <- suppressWarnings(as.numeric(as.character(v)))
+  if (length(cv) == 0) return(FALSE)
+  sum(!is.na(cv)) / length(cv) > min_frac
+}
+
+#' Build the analysis frame for a count- or ratio-based input
+#'
+#' Format 2 (raw counts) and Format 3 (isotopic ratios) differ only in the
+#' three column names and in which conversion turns them into ages; the frame
+#' construction and the numeric coercion are identical.
+#'
+#' @param raw Normalised raw sheet.
+#' @param start_row,end_row Row range for this zircon.
+#' @param src Column names as they appear in `raw`.
+#' @param dst Column names as they appear downstream.
+#' @return data.frame with Analysis, Time and the three renamed columns.
+#' @keywords internal
+adept_raw_frame <- function(raw, start_row, end_row, src, dst) {
+  d <- data.frame(
+    Analysis = raw$Analysis[start_row:end_row],
+    Time     = raw$Time[start_row:end_row],
+    stringsAsFactors = FALSE
+  )
+  for (k in seq_along(dst)) {
+    d[[dst[k]]] <- raw[[src[k]]][start_row:end_row]
+  }
+  d[, -1] <- lapply(d[, -1, drop = FALSE],
+                    function(v) suppressWarnings(as.numeric(v)))
+  d
+}
+
 #' Read all sheets from an Excel input file
 #'
 #' Uses the built-in OOXML reader (xlsx.R) so no Excel package is required.
@@ -44,7 +100,7 @@ read_input <- function(file_path) {
 #' @return Character vector of extra numeric column names
 #' @keywords internal
 detect_extra_names <- function(raw, start_row, end_row) {
-  colnames(raw) <- gsub(" |/", "_", colnames(raw))
+  raw <- adept_normalise_colnames(raw)
 
   core_cols <- c("Analysis", "Time",
                  "Age68", "Age75", "Age76",
@@ -59,22 +115,26 @@ detect_extra_names <- function(raw, start_row, end_row) {
   if (end_row < start_row) return(character(0))
   sub <- raw[start_row:end_row, cand, drop = FALSE]
 
-  ok <- vapply(cand, function(cn) {
-    v <- sub[[cn]]
-    if (is.numeric(v)) return(TRUE)
-    cv <- suppressWarnings(as.numeric(as.character(v)))
-    if (length(cv) == 0) return(FALSE)
-    sum(!is.na(cv)) / length(cv) > 0.5
-  }, logical(1), USE.NAMES = FALSE)
-
-  cand[ok]
+  cand[vapply(cand, function(cn) is_numeric_column(sub[[cn]]),
+              logical(1), USE.NAMES = FALSE)]
 }
 
 #' Parse raw segment data and extract age columns
 #'
-#' Detects the input format (Age68, Pb206, or Pb206_U238) and creates a
-#' standardised data.frame with Analysis, Time, Age68, Age75, Age76.
-#' Ages are derived with the built-in decay equations (isotopes.R).
+#' Detects the input format and creates a standardised data.frame with
+#' Analysis, Time and the age columns. Ages are derived with the built-in decay
+#' equations (isotopes.R).
+#'
+#' Four formats are recognised:
+#'   1. direct ages        `Age68`, optionally `Age75` / `Age76`
+#'   2. raw isotope counts `Pb206`, `Pb207`, `U238`
+#'   3. isotopic ratios    `Pb206_U238`, `Pb207_U235`, `Pb207_Pb206`
+#'   4. direct ages with per-point 1-sigmas, `Age68` plus `Age68_1s`
+#'
+#' Formats 2 and 3 always produce all three ages. Format 1 produces only the
+#' columns that are present: a Format 4 input from an external reduction
+#' carries window-level ages, and at that level the 207Pb ratios are too noisy
+#' to be worth computing, so the absence is left visible downstream.
 #'
 #' @param raw Raw data.frame from one sheet
 #' @param start_row,end_row Row window for this chunk
@@ -82,7 +142,7 @@ detect_extra_names <- function(raw, start_row, end_row) {
 #' @return A list with `data`, `extra_names` and `extra_data`
 #' @keywords internal
 parse_segment_data <- function(raw, start_row, end_row, u238u235 = ADEPT_U238U235) {
-  colnames(raw) <- gsub(" |/", "_", colnames(raw))
+  raw <- adept_normalise_colnames(raw)
 
   if ("Age68" %in% colnames(raw) &&
       !all(is.na(raw$Age68[start_row:end_row]))) {
@@ -92,10 +152,6 @@ parse_segment_data <- function(raw, start_row, end_row, u238u235 = ADEPT_U238U23
       Age68    = raw$Age68[start_row:end_row],
       stringsAsFactors = FALSE
     )
-    # v1.3.0: the 207Pb/235U and 207Pb/206Pb ages are optional. A Format 4
-    # input from an external reduction carries window-level ages, and at that
-    # level those two ratios are too noisy to be worth computing. Only add the
-    # columns that are actually there, so the absence stays visible downstream.
     for (a in c("Age75", "Age76")) {
       if (a %in% colnames(raw)) {
         segment.data[[a]] <- raw[[a]][start_row:end_row]
@@ -105,7 +161,7 @@ parse_segment_data <- function(raw, start_row, end_row, u238u235 = ADEPT_U238U23
     segment.data[num_cols] <- lapply(segment.data[num_cols],
                                      function(v) suppressWarnings(as.numeric(v)))
 
-    # optional per-point 1-sigma columns, e.g. Age68_1s. When present the
+    # Optional per-point 1-sigma columns, e.g. Age68_1s. When present the
     # plateau age becomes an inverse-variance weighted mean and MSWD is
     # reported. The suffix means 1-sigma, not 2-sigma - passing 2-sigma
     # shrinks MSWD by a factor of four.
@@ -119,16 +175,9 @@ parse_segment_data <- function(raw, start_row, end_row, u238u235 = ADEPT_U238U23
 
   } else if ("Pb206" %in% colnames(raw) &&
              !all(is.na(raw$Pb206[start_row:end_row]))) {
-    segment.data <- data.frame(
-      Analysis = raw$Analysis[start_row:end_row],
-      Time     = raw$Time[start_row:end_row],
-      Pb206    = raw$Pb206[start_row:end_row],
-      Pb207    = raw$Pb207[start_row:end_row],
-      U238     = raw$U238[start_row:end_row],
-      stringsAsFactors = FALSE
-    )
-    segment.data[, 2:5] <- lapply(segment.data[, 2:5],
-                                  function(v) suppressWarnings(as.numeric(v)))
+    segment.data <- adept_raw_frame(raw, start_row, end_row,
+                                    c("Pb206", "Pb207", "U238"),
+                                    c("Pb206", "Pb207", "U238"))
     ag <- counts_to_ages(segment.data$Pb206, segment.data$Pb207,
                          segment.data$U238, u238u235)
     segment.data$Age68 <- ag$Age68
@@ -137,16 +186,10 @@ parse_segment_data <- function(raw, start_row, end_row, u238u235 = ADEPT_U238U23
 
   } else if ("Pb206_U238" %in% colnames(raw) &&
              !all(is.na(raw$Pb206_U238[start_row:end_row]))) {
-    segment.data <- data.frame(
-      Analysis   = raw$Analysis[start_row:end_row],
-      Time       = raw$Time[start_row:end_row],
-      Pb206U238  = raw$Pb206_U238[start_row:end_row],
-      Pb207U235  = raw$Pb207_U235[start_row:end_row],
-      Pb207Pb206 = raw$Pb207_Pb206[start_row:end_row],
-      stringsAsFactors = FALSE
-    )
-    segment.data[, 2:5] <- lapply(segment.data[, 2:5],
-                                  function(v) suppressWarnings(as.numeric(v)))
+    segment.data <- adept_raw_frame(raw, start_row, end_row,
+                                    c("Pb206_U238", "Pb207_U235",
+                                      "Pb207_Pb206"),
+                                    c("Pb206U238", "Pb207U235", "Pb207Pb206"))
     ag <- ratios_to_ages(segment.data$Pb206U238, segment.data$Pb207U235,
                          segment.data$Pb207Pb206)
     segment.data$Age68 <- ag$Age68
@@ -162,15 +205,11 @@ parse_segment_data <- function(raw, start_row, end_row, u238u235 = ADEPT_U238U23
   extra_names <- setdiff(colnames(raw), colnames(segment.data))
   extra_data <- NULL
   if (length(extra_names) > 0) {
-    extra_data <- raw[start_row:end_row, extra_names, drop = FALSE]
-    extra_is_num <- vapply(extra_names, function(cn) {
-      col_vals <- extra_data[[cn]]
-      if (is.numeric(col_vals)) return(TRUE)
-      converted <- suppressWarnings(as.numeric(as.character(col_vals)))
-      if (length(converted) == 0) return(FALSE)
-      sum(!is.na(converted)) / length(converted) > 0.5
-    }, logical(1), USE.NAMES = FALSE)
-    extra_names <- extra_names[extra_is_num]
+    extra_data    <- raw[start_row:end_row, extra_names, drop = FALSE]
+    extra_is_num  <- vapply(extra_names,
+                            function(cn) is_numeric_column(extra_data[[cn]]),
+                            logical(1), USE.NAMES = FALSE)
+    extra_names   <- extra_names[extra_is_num]
   }
 
   list(data = segment.data, extra_names = extra_names, extra_data = extra_data)
@@ -556,9 +595,34 @@ calc_slopes <- function(df, segments, seg_starts = NULL, seg_ends = NULL) {
 }
 
 #' Plateau variance (within-segment normalised LOESS)
+#'
+#' A segment whose profile is exactly flat has zero range, and `seg_normalise()`
+#' returns `NaN` for every point in it. That propagates to a missing value here
+#' and then through `ifelse(Variance <= threshold, ...)`, which evaluates to
+#' `NA` and silently discards the plateau. A flat segment is the *best* possible
+#' plateau, not an undefined one, so its variance is 0.
+#'
+#' The range is measured from `loess_Age` rather than inferred from the missing
+#' values, because `pmax()` is free to map `NaN` to `NA` and that would erase
+#' the distinction between the two cases below.
+#'
+#' This never fires on a LOESS-smoothed profile, which is never exactly flat.
+#' It fires on `smooth = "none"` input that carries a down-hole fractionation
+#' correction, where a domain really is flat — the same input the MSWD columns
+#' exist for.
+#'
+#' A single-point segment is a different case: its variance is genuinely
+#' undefined and stays `NA`. Both are "missing", but only one is patchable.
+#'
 #' @keywords internal
 calc_variance <- function(df, seg_starts, seg_ends) {
-  seg_var(df$IS_loess, seg_starts, seg_ends)
+  v <- seg_var(df$IS_loess, seg_starts, seg_ends)
+
+  mm   <- seg_minmax(df$loess_Age, seg_starts, seg_ends)
+  flat <- is.finite(mm$min) & is.finite(mm$max) & mm$min == mm$max &
+          seg_n(seg_starts, seg_ends) >= 2L
+  v[flat] <- 0
+  v
 }
 
 #' Plateau uncertainties
@@ -674,8 +738,18 @@ calc_extra_means <- function(segments, df, extra_names,
 }
 
 #' Mean and total uncertainty of Age68/Age75/Age76 per plateau
+#'
+#' The per-ratio uncertainties use the same `calibration_uncertainty` as the
+#' plateau age. They used to hard-code 0.03, which made the summary
+#' inconsistent with the rest of the workbook whenever the caller passed
+#' something else — most visibly at `calibration_uncertainty = 0`, the setting
+#' an externally reduced input needs.
+#'
+#' @param calibration_uncertainty Relative 1-sigma reproducibility of the
+#'   primary reference material.
 #' @keywords internal
-calc_age_means <- function(segments, df, seg_starts = NULL, seg_ends = NULL) {
+calc_age_means <- function(segments, df, seg_starts = NULL, seg_ends = NULL,
+                           calibration_uncertainty = 0.03) {
   if (is.null(seg_starts)) {
     seg_starts <- match(segments$Start, df$Time)
     seg_ends   <- match(segments$End, df$Time)
@@ -687,7 +761,7 @@ calc_age_means <- function(segments, df, seg_starts = NULL, seg_ends = NULL) {
     n  <- mn$n
     s  <- seg_sd_na(v, seg_starts, seg_ends)
     plateau_unc <- s / sqrt(n)
-    cal_unc     <- mn$mean * 0.03
+    cal_unc     <- mn$mean * calibration_uncertainty
     unc <- sqrt(cal_unc^2 + plateau_unc^2)
     unc[n < 2L] <- NA_real_
     segments[[paste0(age_col, "_Mean")]] <- mn$mean

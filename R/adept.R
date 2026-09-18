@@ -4,6 +4,12 @@
 # Wang et al. (2026) method for automated identification of age plateaus
 # from LA-ICP-MS depth profiling data.
 #
+# This file holds the output schema and the entry point. The per-zircon work
+# lives in zircon.R (grouping, ablation window, plateau fitting); the
+# statistics live in segstats.R and processing.R; the filter cascade in
+# filtering.R. `adept()` itself does three things only: read the input, walk
+# over the zircons, and assemble the output.
+#
 # Dependencies: base R + (optional) writexl / mcp / shiny.
 # Everything else — OOXML I/O, U-Pb age conversion, PELT segmentation,
 # ARIMA order selection and plotting — is implemented inside the package.
@@ -190,12 +196,22 @@ adept_blank_block <- function(analysis_name, group_counter, n_points, out_cols) 
 #' Automated Depth Profiling Technique
 #'
 #' Quantitatively identifies and extracts age plateaus from LA-ICP-MS
-#' U-Pb depth profiling data. Supports three input formats: direct ages
-#' (Age68/Age75/Age76), raw isotope counts (Pb206/Pb207/U238), or
-#' isotopic ratios (Pb206_U238/Pb207_U235/Pb207_Pb206).
+#' U-Pb depth profiling data. Supports four input formats: direct ages
+#' (Age68/Age75/Age76), raw isotope counts (Pb206/Pb207/U238), isotopic ratios
+#' (Pb206_U238/Pb207_U235/Pb207_Pb206), or already-reduced ages with per-point
+#' uncertainties (Age68 plus Age68_1s).
+#'
+#' Each zircon is processed independently: the rows sharing an Analysis value
+#' form one unit, the effective-ablation-time window is applied, the profile is
+#' screened and smoothed, PELT finds the segment boundaries, and a four-step
+#' cascade keeps the plateaus that pass. When the input carries per-point
+#' 1-sigmas the plateau age becomes an inverse-variance weighted mean and MSWD
+#' is reported alongside it.
 #'
 #' @param file_path Path to the input Excel (.xlsx) or CSV file.
-#' @param chunk_size Number of rows per processing chunk (default 411)
+#' @param chunk_size Number of rows per processing chunk. Only used for input
+#'   with no Analysis column, where the row count is the only grouping signal;
+#'   otherwise consecutive rows sharing an Analysis value form one zircon.
 #' @param lower_ablation_time Minimum effective ablation time in seconds (default 29)
 #' @param upper_ablation_time Maximum effective ablation time in seconds (default 58)
 #' @param max_age_limit Maximum valid age in Ma (default 4540)
@@ -205,11 +221,25 @@ adept_blank_block <- function(analysis_name, group_counter, n_points, out_cols) 
 #' @param variance_threshold Maximum allowed intra-plateau variance (default 0.1192)
 #' @param filter_direction \code{"Forward"} keeps ascending age sequences;
 #'   \code{"Reverse"} keeps descending age sequences.
+#' @param direction_method,direction_tolerance How the directional step selects
+#'   plateaus; see \code{\link{filter_direction}}.
 #' @param outlier_method Outlier detection before smoothing:
 #'   \code{"arima"} (default, matches the published method), \code{"mad"}
 #'   (fast robust z-score) or \code{"none"}.
 #' @param outlier_sd Threshold in residual standard deviations (default 2).
+#' @param preprocess \code{"arima_loess"} (default, the published pipeline) or
+#'   \code{"robust_loess"}, which skips the ARIMA screen and fits a robust
+#'   M-estimator LOESS instead.
+#' @param smooth \code{"loess"} (default) or \code{"none"}. Use \code{"none"}
+#'   for input that already carries a down-hole fractionation correction: such
+#'   a profile is flat inside a domain, and LOESS would round off the real
+#'   domain boundaries.
+#' @param calibration_uncertainty Relative 1-sigma reproducibility of the
+#'   primary reference material (default 0.03, i.e. 3 \%). Set it to \code{0}
+#'   when the input's own per-point sigmas already include the external
+#'   reproducibility, or the term is counted twice.
 #' @param u238u235 238U/235U ratio used for count-based input (default 137.818).
+#' @param validate_input Logical. Report structural input problems up front?
 #' @param mcmc Logical. Run Bayesian MCMC posterior analysis? (default \code{FALSE}).
 #'   Requires the suggested package \pkg{mcp} (and JAGS); if unavailable the
 #'   MCMC columns are \code{NA} rather than an error.
@@ -226,6 +256,9 @@ adept_blank_block <- function(analysis_name, group_counter, n_points, out_cols) 
 #'
 #' @return Invisibly returns a list with \code{summary}, \code{full},
 #'   \code{plots} and (optionally) \code{profiles}.
+#'
+#' @seealso \code{\link{adept_sensitivity}} to quantify how much the result
+#'   depends on \code{variance_threshold} and \code{min_plateau_resolution}.
 #'
 #' @export
 #' @importFrom stats loess predict var sd residuals lm coef complete.cases median mad setNames
@@ -329,330 +362,101 @@ adept <- function(
   }
   if (is.null(plot_dir)) plot_dir <- dirname(file_path)
 
-  # ---- Progress bookkeeping -----------------------------------------------
-  # Count the same units the main loop processes: one per Analysis group when
-  # an Analysis column exists, otherwise one per chunk_size rows.
-  total_units <- sum(vapply(sheet_names, function(s) {
-    d  <- data_list[[s]]
-    ac <- intersect(c("Analysis", "Analysis_"), colnames(d))[1]
-    if (!is.na(ac)) {
-      as.numeric(length(rle(as.character(d[[ac]]))$lengths))
-    } else {
-      as.numeric(max(1L, ceiling(nrow(d) / chunk_size)))
-    }
-  }, numeric(1)))
+  # ---- Grouping and progress bookkeeping -----------------------------------
+  # One unit of work is one zircon. The row ranges are computed once and reused
+  # by the main loop, so the progress denominator and the loop cannot disagree
+  # about how many zircons there are.
+  groups <- setNames(lapply(sheet_names, function(s) {
+    adept_zircon_groups(data_list[[s]], chunk_size, s)
+  }), sheet_names)
+  total_units <- sum(vapply(groups, function(g) as.numeric(g$n), numeric(1)))
   if (total_units < 1) total_units <- 1
   done_units <- 0
 
+  # Everything the per-zircon steps need, in one object. Each step then takes
+  # (data, cfg) instead of a dozen positional arguments, and adding a parameter
+  # to adept() means adding one line here rather than threading it through
+  # four call signatures.
+  cfg <- list(
+    u238u235                = u238u235,
+    validate_input          = validate_input,
+    lower_ablation_time     = lower_ablation_time,
+    upper_ablation_time     = upper_ablation_time,
+    preprocess              = preprocess,
+    smooth                  = smooth,
+    outlier_method          = outlier_method,
+    outlier_sd              = outlier_sd,
+    calibration_uncertainty = calibration_uncertainty,
+    min_age_limit           = min_age_limit,
+    max_age_limit           = max_age_limit,
+    variance_threshold      = variance_threshold,
+    min_plateau_resolution  = min_plateau_resolution,
+    filter_direction        = filter_direction,
+    direction_method        = direction_method,
+    direction_tolerance     = direction_tolerance,
+    all_extra_names         = all_extra_names
+  )
+
   # ---- Main loop (one iteration per zircon) --------------------------------
   for (sheet_name in sheet_names) {
-    segment_data_raw <- data_list[[sheet_name]]
-    group_counter <- 1
-
-    an_col <- intersect(c("Analysis", "Analysis_"),
-                        colnames(segment_data_raw))[1]
-
-    # v1.3.0: split by analysis, not by row count. A sheet that stacks several
-    # zircons used to be cut every chunk_size rows, which both merged different
-    # zircons into a single block and could split one zircon across two chunks.
-    # The output columns have always assumed one analysis per block. Consecutive
-    # rows sharing an Analysis value now form one unit; chunk_size is only the
-    # fallback for data with no Analysis column at all.
-    if (!is.na(an_col)) {
-      runs         <- rle(as.character(segment_data_raw[[an_col]]))
-      group_ends   <- cumsum(runs$lengths)
-      group_starts <- c(1L, utils::head(group_ends, -1L) + 1L)
-    } else {
-      k            <- max(1L, ceiling(nrow(segment_data_raw) / chunk_size))
-      group_starts <- (seq_len(k) - 1L) * chunk_size + 1L
-      group_ends   <- pmin(seq_len(k) * chunk_size, nrow(segment_data_raw))
-    }
-    n_groups <- length(group_starts)
+    raw <- data_list[[sheet_name]]
+    grp <- groups[[sheet_name]]
 
     if (isTRUE(verbose)) {
-      message(sprintf("Processing: '%s' (%d zircon(s))", sheet_name, n_groups))
+      message(sprintf("Processing: '%s' (%d zircon(s))", sheet_name, grp$n))
     }
 
-    for (i in seq_len(n_groups)) {
-      start_row <- group_starts[i]
-      end_row   <- group_ends[i]
+    group_counter <- 1
+    for (i in seq_len(grp$n)) {
+      start_row <- grp$starts[i]
+      end_row   <- grp$ends[i]
 
-      name_at_start <- if (is.na(an_col)) {
-        paste0(sheet_name, "_", start_row)
-      } else {
-        as.character(segment_data_raw[[an_col]][start_row])
-      }
+      r <- adept_one_zircon(raw, start_row, end_row, sheet_name, cfg)
 
-      finish <- function(points, label) {
-        blocks[[length(blocks) + 1]] <<-
-          adept_blank_block(name_at_start, group_counter, points, out_cols)
-        done_units <<- done_units + 1
+      if (!isTRUE(r$ok)) {
+        # A zircon that cannot be processed still occupies a row in the output,
+        # so that the summary accounts for every unit the progress bar counted.
+        blocks[[length(blocks) + 1L]] <-
+          adept_blank_block(grp$labels[i], group_counter, r$points, out_cols)
+        done_units <- done_units + 1
         report(done_units / total_units,
-               sprintf("%s #%d (%s)", sheet_name, i, label))
-        group_counter <<- group_counter + 1
-      }
-
-      parsed <- try(parse_segment_data(segment_data_raw, start_row, end_row,
-                                       u238u235), silent = TRUE)
-      if (inherits(parsed, "try-error")) {
-        warning(sprintf("Sheet '%s' rows %d-%d skipped: %s", sheet_name,
-                        start_row, end_row,
-                        conditionMessage(attr(parsed, "condition"))),
-                call. = FALSE)
-        finish(0, "skipped")
+               sprintf("%s #%d (%s)", sheet_name, i, r$label))
+        group_counter <- group_counter + 1
         next
       }
 
-      segment.data <- parsed$data
-      extra_names  <- parsed$extra_names
-      extra_raw    <- parsed$extra_data
-
-      if (isTRUE(validate_input)) {
-        problems <- validate_segment_data(
-          segment.data,
-          label = sprintf("'%s' rows %d-%d", sheet_name, start_row, end_row))
-        # Only structural problems are fatal: a missing age column or a Time
-        # axis that looks like milliseconds means the pipeline cannot run.
-        fatal <- grepl("no recognisable|not monotonically|not numeric|is not numeric",
-                       problems)
-        if (any(fatal)) {
-          warning(sprintf("Sheet '%s' rows %d-%d: %s", sheet_name,
-                          start_row, end_row,
-                          paste(problems[fatal], collapse = "; ")),
-                  call. = FALSE)
-          finish(0, "failed validation")
-          next
-        }
-      }
-
-      segment.data$.ROWID. <- seq_len(nrow(segment.data))
-      if (length(extra_names) > 0 && !is.null(extra_raw)) {
-        extra_raw$.ROWID. <- seq_len(nrow(extra_raw))
-      }
-
-      # v1.3.0: the 207Pb/235U and 207Pb/206Pb ages may be absent. A Format 4
-      # input comes from a reduction that works at the window level, where
-      # those two ratios are too noisy to be worth carrying. See the branches
-      # below: everything that depends on them is skipped when they are missing.
-      has_75 <- "Age75" %in% names(segment.data)
-      has_76 <- "Age76" %in% names(segment.data)
-
-      if (all(is.na(segment.data$Age68)) ||
-          (has_75 && all(is.na(segment.data$Age75))) ||
-          (has_76 && all(is.na(segment.data$Age76)))) {
-        finish(0, "no ages")
-        next
-      }
-
-      num_cols <- setdiff(names(segment.data), c("Analysis", ".ROWID."))
-      for (cn in num_cols) {
-        segment.data[[cn]] <- suppressWarnings(as.numeric(segment.data[[cn]]))
-      }
-      need <- c("Analysis", "Time", "Age68",
-                if (has_75) "Age75", if (has_76) "Age76")
-      keep <- complete.cases(segment.data[, need, drop = FALSE])
-      segment.data <- segment.data[keep, , drop = FALSE]
-
-      # The ablation window is applied to every input, including Format 4. An
-      # external reduction that has already cut its own window should pass
-      # lower_ablation_time = 0 and an upper bound past its last window, rather
-      # than have ADEPT guess: a per-point sigma column says nothing about
-      # where the window ends, and guessing wrong silently changes how many
-      # points enter the segmentation.
-      in_win <- which(segment.data$Time >= lower_ablation_time &
-                      segment.data$Time <= upper_ablation_time)
-      subset_data <- segment.data[in_win, , drop = FALSE]
-
-      if (nrow(subset_data) == 0) {
-        finish(0, "empty window")
-        next
-      }
-
-      if (isTRUE(validate_input)) {
-        problems <- validate_segment_data(
-          subset_data,
-          label = sprintf("'%s' rows %d-%d (ablation window)", sheet_name,
-                          start_row, end_row),
-          check_values = TRUE)
-        if (length(problems) > 0L) {
-          warning(sprintf("Sheet '%s' rows %d-%d (ablation window): %s",
-                          sheet_name, start_row, end_row,
-                          paste(problems, collapse = "; ")), call. = FALSE)
-        }
-      }
-
-      # v1.3.0: 207Pb/206Pb is optional now, so use a safe stand-in for the
-      # branch test instead of letting ifelse() receive a zero-length vector
-      # when the column is absent.
-      a76 <- if (is.null(subset_data$Age76)) {
-        rep(NA_real_, nrow(subset_data))
-      } else {
-        subset_data$Age76
-      }
-
-      subset_data$Raw_Age <- ifelse(subset_data$Age68 < 1000,
-                                    subset_data$Age68,
-                                    ifelse(a76 > 1000, a76, NA))
-
-      # v1.3.0: when the input supplied per-point 1-sigmas, carry one alongside
-      # Raw_Age. The branches below mirror the ones above exactly, so the sigma
-      # always belongs to whichever age Raw_Age was taken from.
-      if (!is.null(subset_data$Age68_1s)) {
-        s68 <- subset_data$Age68_1s
-        s76 <- if (!is.null(subset_data$Age76_1s)) {
-          subset_data$Age76_1s
-        } else {
-          rep(NA_real_, nrow(subset_data))
-        }
-        subset_data$Raw_Age_sigma <-
-          ifelse(subset_data$Age68 < 1000, s68,
-                 ifelse(a76 > 1000, s76, NA))
-      }
-
-      if (all(is.na(subset_data$Age68)) ||
-          (has_75 && all(is.na(subset_data$Age75))) ||
-          (has_76 && all(is.na(subset_data$Age76)))) {
-        finish(nrow(subset_data), "no ages in window")
-        next
-      }
-
-      # ---- Preprocessing ----------------------------------------------------
-      # arima_loess  : ARIMA residual screening, then an ordinary LOESS fit
-      #                (the published v1.x pipeline)
-      # robust_loess : skip the ARIMA screening entirely and let a robust
-      #                M-estimator LOESS downweight outliers instead. Fewer
-      #                steps, no model-order selection, no hard deletion of
-      #                points.
-      if (identical(preprocess, "arima_loess")) {
-        subset_data$Age68 <- arima_outlier(subset_data$Age68, outlier_method, outlier_sd)
-        # Age75 and Age76 are optional (a Format 4 input may carry neither),
-        # so only screen the columns that are actually present.
-        if (has_75) {
-          subset_data$Age75 <- arima_outlier(subset_data$Age75, outlier_method, outlier_sd)
-        }
-        if (has_76) {
-          subset_data$Age76 <- arima_outlier(subset_data$Age76, outlier_method, outlier_sd)
-        }
-      }
-      subset_data <- discordance_filter(subset_data)
-      subset_data$subset_Age68 <- mean_fill(subset_data$subset_Age68,
-                                            subset_data$Age68)
-      if (has_76) {
-        subset_data$subset_Age76 <- mean_fill(subset_data$subset_Age76,
-                                              subset_data$Age76)
-      } else {
-        subset_data$subset_Age76 <- rep(NA_real_, nrow(subset_data))
-      }
-      subset_data$subset_Age <- ifelse(subset_data$subset_Age68 < 1000,
-                                       subset_data$subset_Age68,
-                                       ifelse(subset_data$subset_Age76 > 1000,
-                                              subset_data$subset_Age76, NA))
-
-      ok_age <- !is.na(subset_data$subset_Age)
-      if (sum(ok_age) < 10) {
-        finish(nrow(subset_data), "too few points")
-        next
-      }
-      subset_data <- subset_data[ok_age, , drop = FALSE]
-      subset_data$Row_Number <- seq_len(nrow(subset_data))
-
-      # Merge extra columns
-      if (length(extra_names) > 0 && !is.null(extra_raw)) {
-        matched_rows <- match(subset_data$.ROWID., extra_raw$.ROWID.)
-        extra_names <- intersect(extra_names, all_extra_names)
-        for (col in extra_names) {
-          subset_data[[col]] <- suppressWarnings(
-            as.numeric(as.character(extra_raw[[col]][matched_rows])))
-        }
-      } else {
-        extra_names <- character(0)
-      }
-
-      # ---- Smoothing --------------------------------------------------------
-      # smooth = "none" keeps the ages as measured. Use it when the input has
-      # already been corrected for down-hole fractionation (e.g. an F(tau)
-      # correction in an external reduction): the profile is then flat inside
-      # a domain, and LOESS would round off the real domain boundaries.
-      subset_data <- loess_segment(
-        subset_data, span = 0.15,
-        family = if (identical(preprocess, "robust_loess")) "symmetric" else "gaussian",
-        smooth = smooth
-      )
-      if (nrow(subset_data) == 0 ||
-          sum(!is.na(subset_data$standardized_loess)) < 10) {
-        finish(nrow(subset_data), "smoothing failed")
-        next
-      }
-
-      # ---- PELT -------------------------------------------------------------
-      pelt <- pelt_segmentation(subset_data$standardized_loess,
-                                nrow(subset_data))
-      changepoints <- pelt$changepoints
-      subset_data$Change_loess <- ifelse(subset_data$Row_Number %in% changepoints,
-                                         "YES", "NO")
-
-      seg_result  <- build_segments(subset_data, changepoints)
-      segments    <- seg_result$segments
-      subset_data <- seg_result$df
-      seg_starts  <- seg_result$segment_starts
-      seg_ends    <- seg_result$segment_ends
-
-      if (nrow(segments) == 0) {
-        finish(nrow(subset_data), "no segments")
-        next
-      }
-
-      # ---- Plateau statistics (vectorised) ----------------------------------
-      segments <- calc_slopes(subset_data, segments, seg_starts, seg_ends)
-      segments$Variance <- calc_variance(subset_data, seg_starts, seg_ends)
-      segments <- calc_uncertainty(segments, subset_data, seg_starts, seg_ends,
-                                   calibration_uncertainty = calibration_uncertainty)
-      segments <- calc_extra_means(segments, subset_data, extra_names,
-                                   seg_starts, seg_ends)
-      segments <- calc_age_means(segments, subset_data, seg_starts, seg_ends)
-      segments <- calc_concordance(segments)
-
-      segments <- apply_filters(segments,
-                                min_age       = min_age_limit,
-                                max_age       = max_age_limit,
-                                var_threshold = variance_threshold,
-                                min_res       = min_plateau_resolution,
-                                direction     = filter_direction,
-                                direction_method    = direction_method,
-                                direction_tolerance = direction_tolerance)
-
-      n_confirmed <- sum(!is.na(segments$Filter_4))
+      n_confirmed <- r$n_confirmed
       if (isTRUE(verbose)) {
         message(sprintf("[%d/%d] %s - %d plateau(s) confirmed (%s)",
-                        i, n_groups, as.character(subset_data[1, "Analysis"]),
-                        n_confirmed, filter_direction))
+                        i, grp$n, r$analysis, n_confirmed, filter_direction))
       }
 
-      if (isTRUE(mcmc)) segments <- run_mcmc(subset_data, segments)
+      segments <- r$segments
+      if (isTRUE(mcmc)) segments <- run_mcmc(r$data, segments)
 
       if (isTRUE(make_plots)) {
-        plots[[length(plots) + 1]] <- plot_depth_profile(
-          subset_data, segments,
-          title = paste("Analysis:", subset_data[1, "Analysis"]),
-          label = paste0(group_counter, "_", subset_data[1, "Analysis"])
+        plots[[length(plots) + 1L]] <- plot_depth_profile(
+          r$data, segments,
+          title = paste("Analysis:", r$analysis),
+          label = paste0(group_counter, "_", r$analysis)
         )
       }
 
       if (isTRUE(keep_profiles)) {
-        profiles[[length(profiles) + 1]] <- list(
+        profiles[[length(profiles) + 1L]] <- list(
           sheet    = sheet_name,
           group    = group_counter,
-          analysis = as.character(subset_data[1, "Analysis"]),
-          data     = subset_data,
+          analysis = r$analysis,
+          data     = r$data,
           segments = segments
         )
       }
 
-      blocks[[length(blocks) + 1]] <- adept_block(
+      blocks[[length(blocks) + 1L]] <- adept_block(
         segments,
-        analysis_name = as.character(subset_data[1, "Analysis"]),
+        analysis_name = r$analysis,
         group_counter = group_counter,
-        n_points      = nrow(subset_data),
+        n_points      = nrow(r$data),
         out_cols      = out_cols,
         extra_mean_cols = extra_mean_cols,
         mcmc          = mcmc

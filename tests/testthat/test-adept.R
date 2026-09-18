@@ -97,6 +97,22 @@ test_that("robust_loess runs and stays geologically plausible", {
               info = paste(ages, collapse = ", "))
 })
 
+test_that("mcmc = TRUE returns the MCMC schema even when mcp is unavailable", {
+  # The MCMC columns are a separate output schema, and they are additive: the
+  # plateau ages must be identical to an ordinary run. When the suggested
+  # package (and JAGS) is missing the columns have to come back as NA rather
+  # than erroring, because CI does not install it.
+  r <- suppressWarnings(run_example(mcmc = TRUE))
+  expect_true(all(c("MCMC mean", "MCMC lower", "MCMC upper", "MCMC sigma",
+                    "Rhat", "MCMC n.eff", "Filter MCMC") %in%
+                    colnames(r$full)))
+  expect_equal(r$summary[["Final age (Ma)"]],
+               c(21.61724, 22.56383, 23.60464), tolerance = 1e-5)
+  if (!requireNamespace("mcp", quietly = TRUE)) {
+    expect_true(all(is.na(r$full[["MCMC mean"]])))
+  }
+})
+
 test_that("smooth = none segments the profile as measured", {
   # The switch is for data that already carry a down-hole fractionation
   # correction: such a profile is flat inside a domain, so smoothing it again
