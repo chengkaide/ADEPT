@@ -90,15 +90,23 @@ parse_segment_data <- function(raw, start_row, end_row, u238u235 = ADEPT_U238U23
       Analysis = raw$Analysis[start_row:end_row],
       Time     = raw$Time[start_row:end_row],
       Age68    = raw$Age68[start_row:end_row],
-      Age75    = raw$Age75[start_row:end_row],
-      Age76    = raw$Age76[start_row:end_row],
       stringsAsFactors = FALSE
     )
-    segment.data[, 2:5] <- lapply(segment.data[, 2:5],
-                                  function(v) suppressWarnings(as.numeric(v)))
+    # v1.3.0: the 207Pb/235U and 207Pb/206Pb ages are optional. A Format 4
+    # input from an external reduction carries window-level ages, and at that
+    # level those two ratios are too noisy to be worth computing. Only add the
+    # columns that are actually there, so the absence stays visible downstream.
+    for (a in c("Age75", "Age76")) {
+      if (a %in% colnames(raw)) {
+        segment.data[[a]] <- raw[[a]][start_row:end_row]
+      }
+    }
+    num_cols <- setdiff(names(segment.data), "Analysis")
+    segment.data[num_cols] <- lapply(segment.data[num_cols],
+                                     function(v) suppressWarnings(as.numeric(v)))
 
-    # v1.3.0: optional per-point 1-sigma columns, e.g. Age68_1s. When present
-    # the plateau age becomes an inverse-variance weighted mean and MSWD is
+    # optional per-point 1-sigma columns, e.g. Age68_1s. When present the
+    # plateau age becomes an inverse-variance weighted mean and MSWD is
     # reported. The suffix means 1-sigma, not 2-sigma - passing 2-sigma
     # shrinks MSWD by a factor of four.
     for (a in c("Age68", "Age75", "Age76")) {
@@ -322,11 +330,22 @@ validate_segment_data <- function(d, label = "", strict = FALSE,
       add("Time column is not numeric")
     } else {
       fin <- tt[is.finite(tt)]
-      if (length(fin) >= 2L) {
-        if (any(diff(fin) < 0)) {
-          add("Time is not monotonically increasing - it may be in ",
-              "milliseconds rather than seconds, or the rows are out of order")
+      # Monotonicity is a property of each zircon, not of the sheet: a sheet
+      # that stacks several analyses has Time restarting at every one, which is
+      # expected. Check inside each Analysis group (per zircon).
+      grp <- if ("Analysis" %in% names(d)) as.character(d$Analysis) else
+        rep("", length(tt))
+      for (g in unique(grp)) {
+        fg <- tt[grp == g]
+        fg <- fg[is.finite(fg)]
+        if (length(fg) >= 2L && any(diff(fg) < 0)) {
+          add("Time is not monotonically increasing within '", g,
+              "' - it may be in milliseconds rather than seconds, ",
+              "or the rows are out of order")
+          break
         }
+      }
+      if (length(fin) >= 2L) {
         rng <- range(fin)
         if (rng[2] > 1000) {
           add("Time spans ", signif(rng[2], 4),
@@ -381,13 +400,21 @@ validate_segment_data <- function(d, label = "", strict = FALSE,
 #'
 #' For ages < 1000 Ma: marks Age68 as NA if |Age68 - Age75| / Age75 > 0.1
 #'
-#' @param df data.frame with Age68, Age75, Age76 columns
+#' @param df data.frame with Age68 and Age75 (Age76 optional)
 #' @return Modified data.frame with `Age`, `subset_Age68`, `subset_Age76`
 #' @keywords internal
 discordance_filter <- function(df) {
   a75 <- df$Age75
-  df$subset_Age68 <- ifelse(abs(df$Age68 - a75) / a75 <= 0.1, df$Age68, NA)
-  df$subset_Age76 <- df$Age76
+  if (is.null(a75)) {
+    # No 207Pb/235U ages to test concordance against. That is the norm for a
+    # Format 4 input: the reduction that produced those ages has already
+    # applied its own screening, and window-level 207Pb is too noisy to
+    # discriminate on anyway. Keep every point.
+    df$subset_Age68 <- df$Age68
+  } else {
+    df$subset_Age68 <- ifelse(abs(df$Age68 - a75) / a75 <= 0.1, df$Age68, NA)
+  }
+  df$subset_Age76 <- if (is.null(df$Age76)) rep(NA_real_, nrow(df)) else df$Age76
   df
 }
 
@@ -672,6 +699,11 @@ calc_age_means <- function(segments, df, seg_starts = NULL, seg_ends = NULL) {
 #' U-Pb concordance (Age68 / Age75 * 100) per plateau
 #' @keywords internal
 calc_concordance <- function(segments) {
+  if (!all(c("Age68_Mean", "Age75_Mean") %in% colnames(segments))) {
+    # Nothing to compare against when the input carried no 207Pb/235U ages.
+    segments$Concordance <- rep(NA_real_, nrow(segments))
+    return(segments)
+  }
   segments$Concordance <- (segments$Age68_Mean / segments$Age75_Mean) * 100
   segments
 }

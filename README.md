@@ -201,6 +201,41 @@ boundaries.
 Any additional numeric columns (e.g., trace elements) will be automatically
 detected and their plateau means will be included in the output.
 
+### Pairing Format 4 with an external reduction
+
+The combination this format was designed for:
+
+```
+raw counts
+  --[external reduction: dead time, common Pb, F(tau), jackknife]-->
+per-window ages + 1-sigma
+  --[ADEPT, Format 4]-->
+plateau ages + MSWD
+```
+
+Two settings matter when the data arrive that way:
+
+- **`lower_ablation_time = 0`, with `upper_ablation_time` past the last
+  window.** The reduction has already picked its own ablation interval, and
+  ADEPT's default 29-58 s window would cut a piece off the end. The window is
+  deliberately *not* skipped automatically: a per-point sigma column says
+  nothing about where the window ends, and guessing wrong silently changes how
+  many points enter the segmentation.
+- **`calibration_uncertainty = 0`** if those sigmas already include the
+  external reproducibility of the reference material. Most standard-based
+  reductions do include it. Counting it twice roughly multiplies the reported
+  uncertainty by ten on a 460 Ma zircon (13.7 Ma instead of 1.8 Ma), which
+  buries everything the per-point errors were there to resolve.
+
+`smooth = "none"` is worth trying too, since it segments the measured profile
+rather than a smoothed version of it. On data that are already window-averaged
+the difference is usually small - the windows are smooth to begin with - but it
+removes a step that is not needed.
+
+A sheet may also stack as many zircons as you like: rows are grouped by
+`Analysis`, and each group is segmented on its own. `Time` only has to increase
+*within* a group, so every zircon's clock can restart from zero.
+
 ## Output
 
 ### Excel file (two sheets)

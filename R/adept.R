@@ -285,6 +285,10 @@ adept <- function(
   }
   report <- function(fraction, detail) {
     if (is.function(progress)) try(progress(fraction, detail), silent = TRUE)
+    # v1.3.0: also surface it under verbose. Without this a zircon that drops
+    # out early ("too few points", "empty window", ...) disappears silently,
+    # and the only symptom is a short summary table.
+    if (isTRUE(verbose)) message("  ", detail)
     invisible(NULL)
   }
 
@@ -326,28 +330,52 @@ adept <- function(
   if (is.null(plot_dir)) plot_dir <- dirname(file_path)
 
   # ---- Progress bookkeeping -----------------------------------------------
-  total_units <- sum(vapply(sheet_names, function(s)
-    ceiling(nrow(data_list[[s]]) / chunk_size), numeric(1)))
+  # Count the same units the main loop processes: one per Analysis group when
+  # an Analysis column exists, otherwise one per chunk_size rows.
+  total_units <- sum(vapply(sheet_names, function(s) {
+    d  <- data_list[[s]]
+    ac <- intersect(c("Analysis", "Analysis_"), colnames(d))[1]
+    if (!is.na(ac)) {
+      as.numeric(length(rle(as.character(d[[ac]]))$lengths))
+    } else {
+      as.numeric(max(1L, ceiling(nrow(d) / chunk_size)))
+    }
+  }, numeric(1)))
   if (total_units < 1) total_units <- 1
   done_units <- 0
 
   # ---- Main loop (one iteration per zircon) --------------------------------
   for (sheet_name in sheet_names) {
     segment_data_raw <- data_list[[sheet_name]]
-    n_groups <- ceiling(nrow(segment_data_raw) / chunk_size)
-    if (n_groups < 1) n_groups <- 1
     group_counter <- 1
+
+    an_col <- intersect(c("Analysis", "Analysis_"),
+                        colnames(segment_data_raw))[1]
+
+    # v1.3.0: split by analysis, not by row count. A sheet that stacks several
+    # zircons used to be cut every chunk_size rows, which both merged different
+    # zircons into a single block and could split one zircon across two chunks.
+    # The output columns have always assumed one analysis per block. Consecutive
+    # rows sharing an Analysis value now form one unit; chunk_size is only the
+    # fallback for data with no Analysis column at all.
+    if (!is.na(an_col)) {
+      runs         <- rle(as.character(segment_data_raw[[an_col]]))
+      group_ends   <- cumsum(runs$lengths)
+      group_starts <- c(1L, utils::head(group_ends, -1L) + 1L)
+    } else {
+      k            <- max(1L, ceiling(nrow(segment_data_raw) / chunk_size))
+      group_starts <- (seq_len(k) - 1L) * chunk_size + 1L
+      group_ends   <- pmin(seq_len(k) * chunk_size, nrow(segment_data_raw))
+    }
+    n_groups <- length(group_starts)
 
     if (isTRUE(verbose)) {
       message(sprintf("Processing: '%s' (%d zircon(s))", sheet_name, n_groups))
     }
 
-    an_col <- intersect(c("Analysis", "Analysis_"),
-                        colnames(segment_data_raw))[1]
-
     for (i in seq_len(n_groups)) {
-      start_row <- (i - 1) * chunk_size + 1
-      end_row   <- min(i * chunk_size, nrow(segment_data_raw))
+      start_row <- group_starts[i]
+      end_row   <- group_ends[i]
 
       name_at_start <- if (is.na(an_col)) {
         paste0(sheet_name, "_", start_row)
@@ -402,9 +430,16 @@ adept <- function(
         extra_raw$.ROWID. <- seq_len(nrow(extra_raw))
       }
 
+      # v1.3.0: the 207Pb/235U and 207Pb/206Pb ages may be absent. A Format 4
+      # input comes from a reduction that works at the window level, where
+      # those two ratios are too noisy to be worth carrying. See the branches
+      # below: everything that depends on them is skipped when they are missing.
+      has_75 <- "Age75" %in% names(segment.data)
+      has_76 <- "Age76" %in% names(segment.data)
+
       if (all(is.na(segment.data$Age68)) ||
-          all(is.na(segment.data$Age75)) ||
-          all(is.na(segment.data$Age76))) {
+          (has_75 && all(is.na(segment.data$Age75))) ||
+          (has_76 && all(is.na(segment.data$Age76)))) {
         finish(0, "no ages")
         next
       }
@@ -413,10 +448,17 @@ adept <- function(
       for (cn in num_cols) {
         segment.data[[cn]] <- suppressWarnings(as.numeric(segment.data[[cn]]))
       }
-      keep <- complete.cases(segment.data[, c("Analysis", "Time", "Age68",
-                                              "Age75", "Age76")])
+      need <- c("Analysis", "Time", "Age68",
+                if (has_75) "Age75", if (has_76) "Age76")
+      keep <- complete.cases(segment.data[, need, drop = FALSE])
       segment.data <- segment.data[keep, , drop = FALSE]
 
+      # The ablation window is applied to every input, including Format 4. An
+      # external reduction that has already cut its own window should pass
+      # lower_ablation_time = 0 and an upper bound past its last window, rather
+      # than have ADEPT guess: a per-point sigma column says nothing about
+      # where the window ends, and guessing wrong silently changes how many
+      # points enter the segmentation.
       in_win <- which(segment.data$Time >= lower_ablation_time &
                       segment.data$Time <= upper_ablation_time)
       subset_data <- segment.data[in_win, , drop = FALSE]
@@ -439,10 +481,18 @@ adept <- function(
         }
       }
 
+      # v1.3.0: 207Pb/206Pb is optional now, so use a safe stand-in for the
+      # branch test instead of letting ifelse() receive a zero-length vector
+      # when the column is absent.
+      a76 <- if (is.null(subset_data$Age76)) {
+        rep(NA_real_, nrow(subset_data))
+      } else {
+        subset_data$Age76
+      }
+
       subset_data$Raw_Age <- ifelse(subset_data$Age68 < 1000,
                                     subset_data$Age68,
-                                    ifelse(subset_data$Age76 > 1000,
-                                           subset_data$Age76, NA))
+                                    ifelse(a76 > 1000, a76, NA))
 
       # v1.3.0: when the input supplied per-point 1-sigmas, carry one alongside
       # Raw_Age. The branches below mirror the ones above exactly, so the sigma
@@ -456,12 +506,12 @@ adept <- function(
         }
         subset_data$Raw_Age_sigma <-
           ifelse(subset_data$Age68 < 1000, s68,
-                 ifelse(subset_data$Age76 > 1000, s76, NA))
+                 ifelse(a76 > 1000, s76, NA))
       }
 
       if (all(is.na(subset_data$Age68)) ||
-          all(is.na(subset_data$Age75)) ||
-          all(is.na(subset_data$Age76))) {
+          (has_75 && all(is.na(subset_data$Age75))) ||
+          (has_76 && all(is.na(subset_data$Age76)))) {
         finish(nrow(subset_data), "no ages in window")
         next
       }
@@ -475,14 +525,24 @@ adept <- function(
       #                points.
       if (identical(preprocess, "arima_loess")) {
         subset_data$Age68 <- arima_outlier(subset_data$Age68, outlier_method, outlier_sd)
-        subset_data$Age75 <- arima_outlier(subset_data$Age75, outlier_method, outlier_sd)
-        subset_data$Age76 <- arima_outlier(subset_data$Age76, outlier_method, outlier_sd)
+        # Age75 and Age76 are optional (a Format 4 input may carry neither),
+        # so only screen the columns that are actually present.
+        if (has_75) {
+          subset_data$Age75 <- arima_outlier(subset_data$Age75, outlier_method, outlier_sd)
+        }
+        if (has_76) {
+          subset_data$Age76 <- arima_outlier(subset_data$Age76, outlier_method, outlier_sd)
+        }
       }
       subset_data <- discordance_filter(subset_data)
       subset_data$subset_Age68 <- mean_fill(subset_data$subset_Age68,
                                             subset_data$Age68)
-      subset_data$subset_Age76 <- mean_fill(subset_data$subset_Age76,
-                                            subset_data$Age76)
+      if (has_76) {
+        subset_data$subset_Age76 <- mean_fill(subset_data$subset_Age76,
+                                              subset_data$Age76)
+      } else {
+        subset_data$subset_Age76 <- rep(NA_real_, nrow(subset_data))
+      }
       subset_data$subset_Age <- ifelse(subset_data$subset_Age68 < 1000,
                                        subset_data$subset_Age68,
                                        ifelse(subset_data$subset_Age76 > 1000,
