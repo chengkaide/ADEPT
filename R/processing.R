@@ -97,6 +97,18 @@ parse_segment_data <- function(raw, start_row, end_row, u238u235 = ADEPT_U238U23
     segment.data[, 2:5] <- lapply(segment.data[, 2:5],
                                   function(v) suppressWarnings(as.numeric(v)))
 
+    # v1.3.0: optional per-point 1-sigma columns, e.g. Age68_1s. When present
+    # the plateau age becomes an inverse-variance weighted mean and MSWD is
+    # reported. The suffix means 1-sigma, not 2-sigma - passing 2-sigma
+    # shrinks MSWD by a factor of four.
+    for (a in c("Age68", "Age75", "Age76")) {
+      sc <- paste0(a, "_1s")
+      if (sc %in% colnames(raw) && !all(is.na(raw[[sc]][start_row:end_row]))) {
+        segment.data[[sc]] <- suppressWarnings(
+          as.numeric(raw[[sc]][start_row:end_row]))
+      }
+    }
+
   } else if ("Pb206" %in% colnames(raw) &&
              !all(is.na(raw$Pb206[start_row:end_row]))) {
     segment.data <- data.frame(
@@ -558,12 +570,30 @@ calc_uncertainty <- function(segments, df, seg_starts, seg_ends,
                                               "Age76")) {
   decay_system <- match.arg(decay_system)
 
-  segments$Calibration_uncertainty <-
-    segments$Segment_Mean * calibration_uncertainty
   n  <- seg_count(df$Raw_Age, seg_starts, seg_ends)
   sd <- seg_sd_na(df$Raw_Age, seg_starts, seg_ends)
   pu <- sd / sqrt(n)
   pu[n < 2L] <- NA_real_
+
+  # v1.3.0: when the input carries a per-point 1-sigma, the plateau age becomes
+  # the inverse-variance weighted mean of the measured ages, and its standard
+  # error comes from the weights rather than from the scatter of the points.
+  # MSWD then reports whether that scatter is consistent with the errors that
+  # were supplied. Without a sigma column, nothing below changes.
+  #
+  # Segment_Mean is replaced before Calibration_uncertainty is derived from it,
+  # because that term is a relative uncertainty on the plateau age.
+  if (!is.null(df$Raw_Age_sigma)) {
+    wm <- seg_weighted_mean(df$Raw_Age, df$Raw_Age_sigma, seg_starts, seg_ends)
+    segments$Segment_Mean  <- wm$mean
+    pu                     <- wm$se
+    segments$MSWD          <- wm$mswd
+    segments$MSWD_prob     <- wm$prob
+    segments$Uncertainty_n <- wm$n
+  }
+
+  segments$Calibration_uncertainty <-
+    segments$Segment_Mean * calibration_uncertainty
   segments$Plateau_uncertainty <- pu
   segments$Total_uncertainty <-
     sqrt(segments$Calibration_uncertainty^2 + pu^2)

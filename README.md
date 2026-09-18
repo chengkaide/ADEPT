@@ -164,10 +164,39 @@ The input Excel file must contain sheets with at least one of the following:
 Columns: `Analysis`, `Time`, `Age68`, `Age75`, `Age76`
 
 ### Format 2: Raw isotope counts
-Columns: `Analysis`, `Time`, `Pb206`, `Pb207`, `U235`, `U238`
+Columns: `Analysis`, `Time`, `Pb206`, `Pb207`, `U238`
 
 ### Format 3: Isotopic ratios
 Columns: `Analysis`, `Time`, `Pb206_U238`, `Pb207_U235`, `Pb207_Pb206`
+
+### Format 4: Direct ages with per-point uncertainties
+Columns: `Analysis`, `Time`, `Age68`, plus `Age68_1s`
+(and optionally `Age75_1s`, `Age76_1s`)
+
+Adding per-point 1-sigma columns changes how a plateau is reduced:
+
+- the **plateau age** becomes the inverse-variance weighted mean of the
+  measured ages instead of the mean of the LOESS-smoothed curve. The weights
+  already carry the information the smoothing was there to supply.
+- the **plateau uncertainty** comes from the weights (`1/sqrt(sum(w))`) rather
+  than from the scatter of the points.
+- **MSWD** is reported, together with its probability. Around 1 means the
+  spread agrees with the errors supplied. Much above 1 means either real age
+  heterogeneity inside the plateau or sigmas that are too small - the usual
+  cause is counting statistics quoted without the external reproducibility.
+  Much below 1 means sigmas that are too large.
+- `Points with uncertainty` reports how many points actually entered the
+  calculation; points with a missing or non-positive sigma are dropped.
+
+The suffix is **1-sigma, not 2-sigma**. Passing 2-sigma makes MSWD four times
+smaller, which turns a failing plateau into an apparently acceptable one.
+
+If those sigmas already include the external reproducibility of the reference
+material, set `calibration_uncertainty = 0` so that term is not counted twice.
+If the data were also corrected for down-hole fractionation before they
+reached ADEPT, set `smooth = "none"` as well: such a profile is flat inside a
+domain, and fitting LOESS to it a second time would round off the real domain
+boundaries.
 
 Any additional numeric columns (e.g., trace elements) will be automatically
 detected and their plateau means will be included in the output.
@@ -264,6 +293,22 @@ unchanged - the bundled example still gives 21.61724 / 22.56383 / 23.60464 Ma.
 Also fills in five parameters that v1.2.0 introduced but the parameter table
 below never listed: `preprocess`, `calibration_uncertainty`,
 `direction_method`, `direction_tolerance` and `validate_input`.
+
+**Per-point uncertainties, and MSWD** (new, Format 4). Supplying `Age68_1s`
+(or `Age75_1s` / `Age76_1s`) alongside the ages switches the plateau age to an
+inverse-variance weighted mean of the measured ages, and adds `MSWD`,
+`MSWD probability` and `Points with uncertainty` to the output. MSWD is the
+number the U-Pb community uses to decide whether a plateau is internally
+consistent: around 1 means the scatter matches the quoted errors.
+
+This also closes a gap the package had from the start. Until now `Plateau
+uncertainty` was the scatter of the points divided by sqrt(n), which measures
+precision but says nothing about whether the points agree with one another -
+a plateau built from two discordant populations could look precise. MSWD is
+the test for that, and it needs per-point errors to exist.
+
+Without sigma columns nothing changes: the three new columns are present and
+`NA`, and every published number is reproduced exactly.
 
 ### 1.2.0
 

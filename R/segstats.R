@@ -78,6 +78,66 @@ seg_sd_na <- function(x, starts, ends) {
   out
 }
 
+#' Per-segment inverse-variance weighted mean, standard error and MSWD
+#'
+#' Used when the input carries a per-point 1-sigma. The plateau age is then the
+#' inverse-variance weighted mean of the measured ages rather than the mean of
+#' the smoothed curve, because the weights already hold the information the
+#' LOESS fit was there to supply.
+#'
+#' MSWD (mean square of weighted deviates) asks whether the scatter of the
+#' points is consistent with the errors they were given:
+#'
+#'     MSWD = sum(w_i * (x_i - xbar)^2) / (n - 1),   w_i = 1 / sigma_i^2
+#'
+#' Around 1 it is: the spread matches the errors and the plateau can be read as
+#' a single age. Much above 1 means either real age heterogeneity inside the
+#' plateau or sigmas that are too small (the usual cause is counting statistics
+#' quoted without the external reproducibility). Much below 1 means sigmas that
+#' are too large.
+#'
+#' `prob` is the probability of seeing a value at least this large under that
+#' consistency assumption; below about 0.05 is the conventional flag.
+#'
+#' Points with a non-finite age or a non-positive sigma are dropped rather than
+#' allowed to fail the whole segment, matching the counterpart implementation
+#' in the Python reduction.
+#'
+#' @return List of numeric vectors `mean`, `se`, `mswd`, `prob` and the integer
+#'   `n` of usable points per segment.
+#' @keywords internal
+seg_weighted_mean <- function(x, s, starts, ends) {
+  ok <- is.finite(x) & is.finite(s) & s > 0
+  w   <- ifelse(ok, 1 / s^2, 0)
+  wx  <- ifelse(ok, x / s^2, 0)
+  wxx <- ifelse(ok, x * x / s^2, 0)
+
+  W   <- seg_sum(w,   starts, ends)
+  WX  <- seg_sum(wx,  starts, ends)
+  WXX <- seg_sum(wxx, starts, ends)
+  n   <- seg_sum(ok,  starts, ends)
+
+  mu <- WX / W
+  se <- 1 / sqrt(W)
+  # Weighted residual sum of squares, in the one-pass form. Safe here because W
+  # is a sum of positive weights and cannot be near zero for a usable segment;
+  # points with sigma <= 0 were already given zero weight.
+  ss   <- WXX - WX * WX / W
+  mswd <- ss / (n - 1)
+  prob <- stats::pf(mswd, n - 1, Inf, lower.tail = FALSE)
+
+  # A single usable point has no scatter to test, so MSWD and the standard
+  # error are undefined. The weighted mean itself is still well defined and is
+  # kept, matching how a one-point segment behaves when no sigmas are supplied.
+  bad <- n < 2L
+  mu[n == 0L] <- NA_real_
+  se[bad]     <- NA_real_
+  mswd[bad]   <- NA_real_
+  prob[bad]   <- NA_real_
+
+  list(mean = mu, se = se, mswd = mswd, prob = prob, n = as.integer(n))
+}
+
 #' Per-segment minimum and maximum
 #'
 #' `tapply()` is used for the min/max reduction only; it runs in C and is

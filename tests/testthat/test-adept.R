@@ -121,6 +121,59 @@ test_that("smooth = none segments the profile as measured", {
                         sm$summary[["Final age (Ma)"]]) < 0.1))
 })
 
+test_that("per-point sigmas switch the plateau age to a weighted mean", {
+  # With a per-point 1-sigma the weighted mean replaces the smoothed-segment
+  # mean, because the weights already carry what the LOESS was there to
+  # recover. MSWD then says whether the scatter agrees with those sigmas.
+  raw <- ADEPT:::read_xlsx_base(example_file())[[1]]
+  expect_true(all(c("Analysis", "Time", "Age68") %in% colnames(raw)))
+
+  with_sigma <- function(sig) {
+    d <- raw
+    d$Age68_1s <- sig
+    p <- tempfile(fileext = ".xlsx")
+    ADEPT:::write_xlsx_base(list(Sheet1 = d), p)
+    p
+  }
+  run_file <- function(p) suppressWarnings(
+    adept(p, output_path = NA, make_plots = FALSE, verbose = FALSE))
+
+  tiny <- with_sigma(0.5); on.exit(unlink(tiny), add = TRUE)
+  big  <- with_sigma(5);   on.exit(unlink(big),  add = TRUE)
+  a <- run_file(tiny)
+  b <- run_file(big)
+
+  expect_true(all(c("MSWD", "MSWD probability", "Points with uncertainty") %in%
+                    colnames(a$summary)))
+  expect_true(all(is.finite(a$summary$MSWD)))
+  expect_true(all(a$summary[["Points with uncertainty"]] > 10))
+
+  # sigmas far below the real scatter must fail the consistency test loudly,
+  # and sigmas far above it must pass it trivially
+  expect_true(all(a$summary$MSWD > 3))
+  expect_true(all(a$summary[["MSWD probability"]] < 0.01))
+  expect_true(all(b$summary$MSWD < 0.5))
+  expect_true(all(b$summary[["MSWD probability"]] > 0.5))
+
+  # a constant sigma means uniform weights, so the plateau age is the plain
+  # mean of the measured ages and does not depend on the sigma value ...
+  expect_equal(a$summary[["Final age (Ma)"]], b$summary[["Final age (Ma)"]],
+               tolerance = 1e-10)
+  # ... which is not the same as the smoothed-curve mean of the default path
+  expect_false(isTRUE(all.equal(a$summary[["Final age (Ma)"]],
+                                run_example()$summary[["Final age (Ma)"]])))
+})
+
+test_that("without sigma columns the new columns stay NA and nothing moves", {
+  r <- run_example()
+  expect_true(all(c("MSWD", "MSWD probability", "Points with uncertainty") %in%
+                    colnames(r$summary)))
+  expect_true(all(is.na(r$summary$MSWD)))
+  expect_true(all(is.na(r$summary[["Points with uncertainty"]])))
+  expect_equal(r$summary[["Final age (Ma)"]],
+               c(21.61724, 22.56383, 23.60464), tolerance = 1e-5)
+})
+
 test_that("the output workbook is written and read back", {
   f <- tempfile(fileext = ".xlsx")
   on.exit(unlink(f), add = TRUE)

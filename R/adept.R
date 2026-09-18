@@ -27,6 +27,7 @@ ADEPT_BASE_COLS <- c(
   "Random uncertainty (Ma)", "Systematic uncertainty (Ma)",
   "Decay constant uncertainty (Ma)", "Decay system",
   "Relative uncertainty (%)",
+  "MSWD", "MSWD probability", "Points with uncertainty",
   "Confirmed plateaus",
   "Concordance (%)",
   "Pb206/U238 age mean (Ma)", "Pb206/U238 total uncertainty (Ma)",
@@ -69,6 +70,7 @@ ADEPT_SUMMARY_COLS <- c(
   "Random uncertainty (Ma)", "Systematic uncertainty (Ma)",
   "Decay constant uncertainty (Ma)", "Decay system",
   "Relative uncertainty (%)",
+  "MSWD", "MSWD probability", "Points with uncertainty",
   "Confirmed plateaus",
   "Total segments",
   "Concordance (%)",
@@ -116,6 +118,11 @@ adept_block <- function(seg, analysis_name, group_counter, n_points,
   set("Calibration uncertainty", col_of("Calibration_uncertainty"))
   set("Plateau uncertainty",     col_of("Plateau_uncertainty"))
   set("Total uncertainty",       col_of("Total_uncertainty"))
+  # v1.3.0: present only when the input carried per-point sigmas. col_of()
+  # returns NA for an absent column, so the output shape does not change.
+  set("MSWD",                    col_of("MSWD"))
+  set("MSWD probability",        col_of("MSWD_prob"))
+  set("Points with uncertainty", col_of("Uncertainty_n"))
   set("Filter 1", col_of("Filter_1"))
   set("Filter 2", col_of("Filter_2"))
   set("Filter 3", col_of("Filter_3"))
@@ -436,6 +443,21 @@ adept <- function(
                                     subset_data$Age68,
                                     ifelse(subset_data$Age76 > 1000,
                                            subset_data$Age76, NA))
+
+      # v1.3.0: when the input supplied per-point 1-sigmas, carry one alongside
+      # Raw_Age. The branches below mirror the ones above exactly, so the sigma
+      # always belongs to whichever age Raw_Age was taken from.
+      if (!is.null(subset_data$Age68_1s)) {
+        s68 <- subset_data$Age68_1s
+        s76 <- if (!is.null(subset_data$Age76_1s)) {
+          subset_data$Age76_1s
+        } else {
+          rep(NA_real_, nrow(subset_data))
+        }
+        subset_data$Raw_Age_sigma <-
+          ifelse(subset_data$Age68 < 1000, s68,
+                 ifelse(subset_data$Age76 > 1000, s76, NA))
+      }
 
       if (all(is.na(subset_data$Age68)) ||
           all(is.na(subset_data$Age75)) ||

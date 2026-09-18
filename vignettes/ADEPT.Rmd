@@ -125,6 +125,58 @@ data.frame(assumed = c("3 %", "1.5 %"),
 
 The age itself does not move; only the uncertainty does.
 
+## Is the plateau internally consistent? (MSWD)
+
+Everything above answers "how precisely do we know this age". MSWD answers a
+different question: **do the points inside the plateau actually agree with one
+another?** A plateau can look precise and still be a mixture of two
+populations.
+
+To ask that question, the input needs a per-point 1-sigma column. Below is a
+synthetic profile containing two real ages, 100 and 130 Ma, whose points
+scatter by 3 Ma - but which claims an uncertainty of only 1.5 Ma:
+
+```{r}
+set.seed(1)
+age <- c(rnorm(133, 100, 3), rnorm(67, 130, 3))
+prof <- data.frame(
+  Analysis = "demo",
+  Time     = seq(0, 60, length.out = 200),
+  Age68    = age,
+  Age75    = age + rnorm(200, 0, 0.5),
+  Age76    = age + rnorm(200, 0, 0.5),
+  Age68_1s = 1.5
+)
+csv <- file.path(tempdir(), "demo.csv")
+write.csv(prof, csv, row.names = FALSE)
+
+w <- adept(csv, output_path = NA, make_plots = FALSE, verbose = FALSE)
+w$summary[, c("Final age (Ma)", "Random uncertainty (Ma)",
+              "MSWD", "MSWD probability", "Points with uncertainty")]
+```
+
+The ages come out right, and MSWD tells you not to trust the uncertainties: a
+value near 4 is what you expect when the real scatter is twice the quoted
+sigma. Read it like this:
+
+- **MSWD around 1** - the spread matches the errors you supplied, and the
+  plateau can be read as a single age.
+- **MSWD much above 1** - the points scatter more than their errors allow.
+  Either the plateau really spans more than one age, or the sigmas are too
+  small. The usual cause of the latter is counting statistics quoted without
+  the external reproducibility of the reference material.
+- **MSWD much below 1** - the sigmas are too large.
+
+`MSWD probability` is the tail probability under the consistent case; below
+about 0.05 is the conventional flag. Here it is essentially zero, which is the
+correct answer for this dataset: the sigmas really are too small.
+
+Note also that with a sigma column the plateau age changes character. It
+becomes the inverse-variance weighted mean of the measured ages, so a point
+measured to 0.5 Ma counts a hundred times as much as one measured to 5 Ma.
+That is why these ages differ slightly from the same profile run without
+sigmas.
+
 ## Choosing the parameters, and knowing how much they matter
 
 Two parameters control how many plateaus you get:

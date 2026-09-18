@@ -130,6 +130,12 @@ Invisibly returns a list with \code{summary}, \code{full}, \code{plots} and
 (optionally) \code{profiles}. Unless disabled, also writes a two-sheet Excel
 file and PDF plots to disk.
 
+Supplying per-point 1-sigma columns switches the plateau age to an
+inverse-variance weighted mean of the measured ages, and adds \code{MSWD},
+\code{MSWD probability} and \code{Points with uncertainty} to the returned
+tables. Without those columns the three columns are still present and
+\code{NA}, and every other number is unchanged.
+
 All numeric columns are returned as numeric (earlier versions returned
 everything as character, which made the exported workbook unusable for
 further calculation). Plot objects are \code{adept_profile} records that are
@@ -137,9 +143,9 @@ drawn by the package's base-graphics renderer, so \pkg{ggplot2} is not needed.
 }
 \description{
 Quantitatively identifies and extracts age plateaus from LA-ICP-MS U-Pb depth
-profiling data. Supports three input formats: direct ages
-(Age68/Age75/Age76), raw isotope counts (Pb206/Pb207/U238), or isotopic ratios
-(Pb206_U238/Pb207_U235/Pb207_Pb206).
+profiling data. Accepts four input layouts: direct ages (Age68/Age75/Age76),
+the same ages with per-point 1-sigma columns (Age68_1s), raw isotope counts
+(Pb206/Pb207/U238), or isotopic ratios (Pb206_U238/Pb207_U235/Pb207_Pb206).
 }
 \details{
 All core functionality runs on base R. OOXML reading and writing, U-Pb age
